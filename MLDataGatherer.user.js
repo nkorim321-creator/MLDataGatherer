@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.5
+// @version      1.6
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. Auto-reloads queue every 1 min with white-page protection. Captcha detection ported from NMSH VACUUM.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -34,7 +34,25 @@
     //  HELPERS
     // ============================================================
     function now(){ return Date.now(); }
-    function log(msg, lvl){ try { console.log(TAG + ' ' + msg); } catch(e){} }
+    // Persistent log: store last 200 lines in localStorage so we keep history
+    // across the page reloads that wipe the DevTools console.
+    var LOG_KEY = 'mldg_log';
+    var LOG_MAX = 200;
+    function tsNow(){
+        var d = new Date();
+        function pad(n){ return n < 10 ? '0' + n : '' + n; }
+        return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    }
+    function log(msg){
+        var line = '[' + tsNow() + '] ' + msg;
+        try { console.log(TAG + ' ' + line); } catch(e){}
+        try {
+            var buf = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
+            buf.push((window.top !== window ? '(iframe) ' : '') + line);
+            if (buf.length > LOG_MAX) buf = buf.slice(-LOG_MAX);
+            localStorage.setItem(LOG_KEY, JSON.stringify(buf));
+        } catch(e){}
+    }
     function txt(el){ return (el && (el.innerText || el.textContent) || '').replace(/\s+/g,' ').trim(); }
     function bust(url){ return url + (url.indexOf('?') > -1 ? '&' : '?') + '_=' + now(); }
     function isOnTaskPage(){ return /\/projects\/.+\/tasks\//.test(location.pathname); }
@@ -559,16 +577,65 @@
     }
 
     // ============================================================
-    //  STATUS BADGE (tiny, optional)
+    //  STATUS BADGE + LOG VIEWER (persists across reloads)
+    //  Click the badge to expand the last 200 log lines pulled from
+    //  localStorage. "Copy" copies them to clipboard, "Clear" resets.
     // ============================================================
     function showBadge(text) {
+        if (window.top !== window) return;  // do not render UI inside iframes
         var b = document.getElementById('mldg-badge');
         if (!b) {
             b = document.createElement('div'); b.id = 'mldg-badge';
-            b.style.cssText = 'position:fixed;bottom:8px;right:8px;z-index:2147483646;background:#222;color:#7CFC00;font:600 11px system-ui;padding:4px 8px;border-radius:4px;opacity:.85;pointer-events:none';
+            b.style.cssText = 'position:fixed;bottom:8px;right:8px;z-index:2147483646;background:#222;color:#7CFC00;font:600 11px system-ui;padding:4px 8px;border-radius:4px;opacity:.9;cursor:pointer;user-select:none';
+            b.title = 'Click to view logs';
+            b.onclick = function () { toggleLogViewer(); };
             if (document.body) document.body.appendChild(b);
         }
-        b.textContent = 'MLDG ' + text;
+        b.textContent = 'MLDG ' + text + ' · 📋';
+    }
+
+    function toggleLogViewer() {
+        var v = document.getElementById('mldg-log-viewer');
+        if (v) { v.remove(); return; }
+        v = document.createElement('div'); v.id = 'mldg-log-viewer';
+        v.style.cssText = 'position:fixed;right:8px;bottom:40px;width:560px;max-height:60vh;z-index:2147483647;background:#111;color:#eee;font:11px ui-monospace,monospace;border:1px solid #444;border-radius:6px;display:flex;flex-direction:column;box-shadow:0 4px 20px rgba(0,0,0,.5)';
+        var hdr = document.createElement('div');
+        hdr.style.cssText = 'padding:6px 10px;background:#222;color:#7CFC00;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #444';
+        hdr.innerHTML = '<span style="font-weight:600">MLDG logs (persistent)</span>';
+        var btns = document.createElement('div');
+        function mkBtn(label, fn){
+            var x = document.createElement('button');
+            x.textContent = label;
+            x.style.cssText = 'margin-left:6px;padding:2px 8px;background:#333;color:#eee;border:1px solid #555;border-radius:3px;font:600 10px system-ui;cursor:pointer';
+            x.onclick = fn; return x;
+        }
+        var body = document.createElement('pre');
+        body.style.cssText = 'margin:0;padding:8px 10px;overflow:auto;white-space:pre-wrap;flex:1;color:#ddd;font:11px ui-monospace,monospace';
+        function refresh(){
+            try {
+                var buf = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
+                body.textContent = buf.join('\n') || '(no logs yet)';
+                body.scrollTop = body.scrollHeight;
+            } catch(e){ body.textContent = 'log read err: ' + e.message; }
+        }
+        btns.appendChild(mkBtn('Copy', function(){
+            try { navigator.clipboard.writeText(body.textContent); } catch(e){}
+        }));
+        btns.appendChild(mkBtn('Refresh', refresh));
+        btns.appendChild(mkBtn('Clear', function(){
+            try { localStorage.removeItem(LOG_KEY); } catch(e){}
+            refresh();
+        }));
+        btns.appendChild(mkBtn('Close', function(){ v.remove(); }));
+        hdr.appendChild(btns);
+        v.appendChild(hdr); v.appendChild(body);
+        document.body.appendChild(v);
+        refresh();
+        // Auto-refresh while open
+        var iv = setInterval(function(){
+            if (!document.body.contains(v)){ clearInterval(iv); return; }
+            refresh();
+        }, 1500);
     }
 
     // ============================================================
@@ -582,15 +649,96 @@
         var p = location.pathname || '';
         return /\/projects\/.+\/tasks\//.test(p);
     }
+    // The HIT's Crowd-HTML form is rendered inside an iframe whose src is
+    // https://worker.mturk.com/work?ui=...  Detect that we're running inside
+    // that iframe (different from window.top) so we can attack the crowd-button
+    // directly without crossing the iframe boundary from the parent.
+    function isInsideHitIframe() {
+        if (window.top === window) return false;
+        var p = location.pathname || '';
+        return /^\/work\/?$/.test(p);
+    }
+
+    // Verify the PARENT page is showing the target MLDataGatherer task before
+    // we auto-submit from inside the iframe — otherwise we'd auto-submit any
+    // HIT the worker accepts.
+    function parentIsTargetTask() {
+        try {
+            var parentBody = window.parent.document.body.innerText || '';
+            if (parentBody.indexOf(TARGET_REQUESTER) === -1) return false;
+            if (parentBody.indexOf(TARGET_TITLE_PREFIX) === -1) return false;
+            return true;
+        } catch (e) {
+            log('iframe: parent access blocked (' + e.message + ')');
+            return false;
+        }
+    }
+
+    var _iframeAttempts = 0;
+    function iframeSubmitLoop() {
+        if (parentIsTargetTask() !== true) {
+            // Not a MLDataGatherer task — do nothing, do not interfere.
+            return;
+        }
+        // Look for crowd-button right here in the iframe document
+        var btn = document.querySelector('crowd-button[data-testid="crowd-submit"]') ||
+                  document.querySelector('crowd-button[form-action="submit"]') ||
+                  document.querySelector('[data-testid="crowd-submit"]');
+        if (!btn) {
+            _iframeAttempts++;
+            if (_iframeAttempts % 5 === 1) log('iframe: crowd-button not present yet (try ' + _iframeAttempts + ')');
+            setTimeout(iframeSubmitLoop, 2000);
+            return;
+        }
+        log('iframe: crowd-button found, firing click');
+        _preSubmitHref = location.href;
+        fireClick(btn);
+        try {
+            if (btn.shadowRoot) {
+                var inner = btn.shadowRoot.querySelector('button');
+                if (inner) { log('iframe: shadow-button click'); fireClick(inner); }
+            }
+        } catch (e) {}
+        // Try <crowd-form>.submit() as belt-and-suspenders
+        setTimeout(function () {
+            try {
+                var cf = btn.closest && btn.closest('crowd-form');
+                if (cf && typeof cf.submit === 'function') { log('iframe: crowd-form.submit()'); cf.submit(); }
+                var f  = btn.form || (btn.closest && btn.closest('form'));
+                if (f) {
+                    log('iframe: form.requestSubmit/submit');
+                    try { if (typeof f.requestSubmit === 'function') f.requestSubmit(); else f.submit(); } catch (e) {}
+                }
+            } catch (e) {}
+        }, 1200);
+        // Re-attempt every 6s in case the click was a no-op (parent URL didn't change)
+        setTimeout(function () {
+            try {
+                if (window.parent && window.parent.location && window.parent.location.href === _preSubmitHref) {
+                    log('iframe: parent URL unchanged, re-trying');
+                    iframeSubmitLoop();
+                }
+            } catch (e) { /* parent navigated away or cross-origin */ }
+        }, 6000);
+    }
 
     function main() {
-        log('v1.5 loaded on ' + location.pathname);
+        log('v1.6 loaded on ' + location.pathname + (window.top !== window ? ' (iframe)' : ' (top)'));
         captchaSystem.watch();
+
+        // IFRAME context — we're inside the HIT's Crowd-HTML iframe. Attack
+        // the crowd-button locally (no cross-boundary DOM walks needed).
+        if (isInsideHitIframe()) {
+            log('Inside HIT iframe — verifying parent then auto-submitting');
+            setTimeout(iframeSubmitLoop, 2500);
+            return;
+        }
+
         handleServerBusy();
 
         if (isQueuePage()) {
             log('Queue page');
-            showBadge('v1.5 queue · auto');
+            showBadge('v1.6 queue · auto');
             whitePageGuard();
             startQueueAutoReload();
             setTimeout(findAndClickWork, WORK_CLICK_DELAY_MS);
@@ -601,13 +749,13 @@
 
         if (isTaskPage()) {
             log('Task page — LOCKED, will never auto-return');
-            showBadge('v1.5 task · LOCKED');
+            showBadge('v1.6 task · LOCKED');
             setTimeout(submitAndReturn, SUBMIT_DELAY_MS);
             return;
         }
 
         log('Idle on ' + location.pathname);
-        showBadge('v1.5 idle');
+        showBadge('v1.6 idle');
     }
 
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
