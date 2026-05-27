@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.9
+// @version      1.10
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. The HIT form is rendered in a cross-origin SageMaker iframe, so the script also runs there and waits for a postMessage auth signal from the worker.mturk.com parent before clicking.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -825,41 +825,37 @@
             return;
         }
         _preSubmitHref = location.href;
+
+        // CRITICAL: Click ONLY the host <crowd-button>. Do NOT click the
+        // shadow-root's inner <button>, and do NOT call form.submit() as a
+        // backup. Both bypass Crowd-HTML's interceptor and trigger a raw
+        // form-submit to the HTML form's default `action`, which in this
+        // HIT lands on worker.mturk.com/projects/.../tasks/.../submit
+        // (a 404 page) and orphans the HIT.
+        //
+        // The host click is what Crowd-HTML listens for: it routes the
+        // submission to ${turkSubmitTo}/mturk/externalSubmit, which is the
+        // correct legacy MTurk endpoint that actually accepts the HIT.
+        //
+        // We use fireClick() to dispatch a full pointer/mouse sequence
+        // (some Polymer handlers need pointerdown+up to register) but only
+        // on the host element.
+        log('sagemaker: firing click on host crowd-button');
         fireClick(btn);
-        try {
-            if (btn.shadowRoot) {
-                var inner = btn.shadowRoot.querySelector('button');
-                if (inner) { log('sagemaker: shadow-button click'); fireClick(inner); }
-            }
-        } catch (e) {}
-        // Try <crowd-form>.submit() as belt-and-suspenders
-        setTimeout(function () {
-            try {
-                var cf = btn.closest && btn.closest('crowd-form');
-                if (cf && typeof cf.submit === 'function') {
-                    if (DRY_RUN) log('iframe: crowd-form.submit() SKIPPED (DRY_RUN) on ' + describeEl(cf));
-                    else { log('iframe: crowd-form.submit()'); cf.submit(); }
-                }
-                var f  = btn.form || (btn.closest && btn.closest('form'));
-                if (f) {
-                    if (DRY_RUN) log('sagemaker: form.requestSubmit/submit SKIPPED (DRY_RUN) on ' + describeEl(f));
-                    else {
-                        log('sagemaker: form.requestSubmit/submit');
-                        try { if (typeof f.requestSubmit === 'function') f.requestSubmit(); else f.submit(); } catch (e) {}
-                    }
-                }
-            } catch (e) {}
-        }, 1200);
-        // Re-attempt every 6s if the click didn't navigate
+
+        // Verify after 8s. If still on the same URL, retry — but do NOT
+        // touch the shadow root or call raw form.submit() this time either.
         setTimeout(function () {
             if (location.href === _preSubmitHref) {
-                log('sagemaker: URL unchanged after click, re-trying');
+                log('sagemaker: URL unchanged after click, re-trying host click');
                 sagemakerSubmitLoop();
+            } else {
+                log('sagemaker: URL changed to ' + location.href.slice(0, 100));
             }
-        }, 6000);
+        }, 8000);
     }
 
-    var V = '1.9' + (DRY_RUN ? ' [DRY-RUN]' : '');
+    var V = '1.10' + (DRY_RUN ? ' [DRY-RUN]' : '');
     // One-time log wipe on version change so the unified log viewer
     // is not polluted with messages from older versions.
     try {
