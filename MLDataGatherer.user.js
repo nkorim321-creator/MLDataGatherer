@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.3
+// @version      1.4
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. Auto-reloads queue every 1 min with white-page protection. Captcha detection ported from NMSH VACUUM.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -322,14 +322,88 @@
         } catch (e) { log('xpath err: ' + e.message); return []; }
     }
 
+    // Direct CSS-selector search — simpler & more reliable than XPath for custom elements.
+    // Returns array of matched elements (in scan order: most-specific first).
+    function cssFindSubmit(root) {
+        var selectors = [
+            'crowd-button[data-testid="crowd-submit"]',
+            'crowd-button[form-action="submit"]',
+            'crowd-button[variant="primary"]',
+            '[data-testid="crowd-submit"]',
+            '[data-testid*="submit" i]',
+            '#submitButton',
+            'button[type="submit"]',
+            'input[type="submit"]',
+            '[class*="submitButton" i]',
+            '[class*="submit-button" i]'
+        ];
+        var out = [];
+        for (var s = 0; s < selectors.length; s++) {
+            try {
+                var hits = root.querySelectorAll(selectors[s]);
+                for (var i = 0; i < hits.length; i++) {
+                    if (out.indexOf(hits[i]) === -1) out.push(hits[i]);
+                }
+            } catch (e) {}
+        }
+        return out;
+    }
+
+    var _debugDumped = false;
+    function debugDumpOnce(roots) {
+        if (_debugDumped) return;
+        _debugDumped = true;
+        try {
+            log('=== DEBUG DUMP === roots=' + roots.length);
+            for (var r = 0; r < roots.length; r++) {
+                var root = roots[r];
+                var kind = (root === document) ? 'main-doc' : ((root.host ? 'shadow-root' : 'iframe-doc'));
+                var url = '';
+                try { url = (root.defaultView && root.defaultView.location && root.defaultView.location.href) || ''; } catch (e) {}
+                var cbCount = 0, dtCount = 0, btnCount = 0;
+                try { cbCount = root.querySelectorAll('crowd-button').length; } catch (e) {}
+                try { dtCount = root.querySelectorAll('[data-testid="crowd-submit"]').length; } catch (e) {}
+                try { btnCount = root.querySelectorAll('button').length; } catch (e) {}
+                log('  root[' + r + '] ' + kind + ' url=' + url.slice(0, 80) +
+                    ' crowd-button=' + cbCount + ' [data-testid=crowd-submit]=' + dtCount + ' button=' + btnCount);
+            }
+            // Also list all iframes in the main document with their src + access status
+            var ifr = document.querySelectorAll('iframe, frame');
+            log('  iframes in main-doc: ' + ifr.length);
+            for (var j = 0; j < ifr.length; j++) {
+                var src = ifr[j].src || ifr[j].getAttribute('srcdoc') ? '(srcdoc)' : '(no src)';
+                var access = 'unknown';
+                try { access = ifr[j].contentDocument ? 'OK' : 'null'; } catch (e) { access = 'BLOCKED: ' + e.message; }
+                var sandbox = ifr[j].getAttribute('sandbox');
+                log('    iframe[' + j + '] src=' + (ifr[j].src || src).slice(0, 80) + ' sandbox=' + (sandbox || '(none)') + ' contentDocument=' + access);
+            }
+            log('=== END DUMP ===');
+        } catch (e) { log('debugDump err: ' + e.message); }
+    }
+
     function findSubmitButton() {
         var roots = collectRoots();
+        debugDumpOnce(roots);
+
+        // 1) Direct CSS selector — best for custom elements like <crowd-button>
         for (var r = 0; r < roots.length; r++) {
-            var hits = xpathFindSubmit(roots[r]);
-            // Prefer visible candidates
-            for (var i = 0; i < hits.length; i++) if (isVisible(hits[i])) return hits[i];
-            // Fall back to first hit even if hidden (might still be clickable in React)
-            if (hits.length) return hits[0];
+            var hits = cssFindSubmit(roots[r]);
+            if (hits.length) {
+                log('CSS hit in root[' + r + ']: ' + hits.length + ' candidate(s)');
+                // Prefer visible
+                for (var i = 0; i < hits.length; i++) if (isVisible(hits[i])) return hits[i];
+                return hits[0];
+            }
+        }
+
+        // 2) XPath fallback for less common cases (text-only buttons, etc.)
+        for (var r2 = 0; r2 < roots.length; r2++) {
+            var xhits = xpathFindSubmit(roots[r2]);
+            if (xhits.length) {
+                log('XPath hit in root[' + r2 + ']: ' + xhits.length + ' candidate(s)');
+                for (var k = 0; k < xhits.length; k++) if (isVisible(xhits[k])) return xhits[k];
+                return xhits[0];
+            }
         }
         return null;
     }
