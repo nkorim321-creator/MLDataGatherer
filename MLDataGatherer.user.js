@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.2
+// @version      1.3
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. Auto-reloads queue every 1 min with white-page protection. Captcha detection ported from NMSH VACUUM.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -293,19 +293,27 @@
         } catch (e) { return true; }
     }
 
-    // XPath text match — handles <button><span>Submit</span></button>, nested whitespace, etc.
+    // XPath text match — handles <button><span>Submit</span></button>, nested whitespace,
+    // AND Amazon's <crowd-button form-action="submit" data-testid="crowd-submit"> web component
+    // (the actual MTurk Submit button — Polymer custom element with shadow DOM).
     function xpathFindSubmit(root) {
         var doc = (root === document || root.nodeType === 9) ? root : (root.ownerDocument || document);
-        // Use `.` (string-value of node) which collects all descendant text and normalizes whitespace.
+        // XPath 1.0 has no lower-case() that's portable, so we match common casings explicitly.
+        // `local-name()` is needed because crowd-button may be in a namespaced parse on some engines.
         var expr =
-            ".//button[normalize-space(.)='Submit']" +
+            // Amazon Crowd HTML Elements — primary target on Smart Capture Invoice Review HITs
+            ".//*[local-name()='crowd-button' and (@form-action='submit' or @data-testid='crowd-submit')]" +
+            " | .//*[@data-testid='crowd-submit']" +
+            " | .//*[local-name()='crowd-button' and normalize-space(.)='Submit']" +
+            // Generic HTML
+            " | .//button[normalize-space(.)='Submit']" +
             " | .//input[(@type='submit' or @type='button') and (normalize-space(@value)='Submit' or normalize-space(.)='Submit')]" +
             " | .//a[normalize-space(.)='Submit']" +
             " | .//*[@role='button' and normalize-space(.)='Submit']" +
             " | .//*[@aria-label='Submit' or @aria-label='submit']" +
             " | .//*[@id='submitButton' or @id='submit-button']";
         var ctx = (root === document) ? document.documentElement : root;
-        if (!ctx || !ctx.ownerDocument && root !== document) return [];
+        if (!ctx) return [];
         try {
             var iter = doc.evaluate(expr, ctx, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
             var out = [];
@@ -346,26 +354,71 @@
     // Track last URL to detect successful navigation after click
     var _preSubmitHref = '';
 
+    // Helper: walk up parents AND host parents (for shadow DOM) to find a matching ancestor
+    function closestAcrossShadow(el, predicate) {
+        var node = el;
+        while (node) {
+            if (predicate(node)) return node;
+            if (node.parentElement) { node = node.parentElement; continue; }
+            // crossed a shadow boundary
+            var root = node.getRootNode && node.getRootNode();
+            if (root && root.host) { node = root.host; continue; }
+            node = null;
+        }
+        return null;
+    }
+
     function clickSubmit() {
         var btn = findSubmitButton();
         if (!btn) return false;
 
-        var tag = btn.tagName + (btn.id ? '#' + btn.id : '') + (btn.className ? '.' + (typeof btn.className === 'string' ? btn.className.split(' ').slice(0,2).join('.') : '') : '');
+        var tag = (btn.tagName || '') + (btn.id ? '#' + btn.id : '');
         log('Submit located: ' + tag + ' | text="' + ((btn.textContent || btn.value || '').trim().slice(0, 40)) + '"');
         showBadge('task · clicking submit');
         _preSubmitHref = location.href;
+
+        // 1. Click the host element — for <crowd-button>, Polymer listens here.
         fireClick(btn);
 
-        // Backup form.submit() — only if a form wraps the button
+        // 2. If it's a <crowd-button>, also click the internal <button> inside its shadow root.
+        try {
+            if (btn.tagName && btn.tagName.toLowerCase() === 'crowd-button' && btn.shadowRoot) {
+                var innerBtn = btn.shadowRoot.querySelector('button');
+                if (innerBtn) {
+                    log('crowd-button shadow click');
+                    fireClick(innerBtn);
+                }
+            }
+        } catch (e) {}
+
+        // 3. Backups — run after the visible click has had a chance to navigate.
         setTimeout(function () {
+            if (location.href !== _preSubmitHref) return;       // already submitted, done
             try {
-                var form = btn.form || (btn.closest && btn.closest('form'));
-                if (form && location.href === _preSubmitHref && /\/projects\/.+\/tasks\//.test(location.pathname)) {
-                    log('Backup form.submit()');
-                    try { form.submit(); } catch (e) {}
+                // 3a. <crowd-form>.submit() — Amazon's wrapper exposes a submit method
+                var crowdForm = closestAcrossShadow(btn, function (n) {
+                    return n.tagName && n.tagName.toLowerCase() === 'crowd-form';
+                });
+                if (crowdForm) {
+                    log('Backup crowd-form.submit()');
+                    try {
+                        if (typeof crowdForm.submit === 'function') crowdForm.submit();
+                        else if (typeof crowdForm.onSubmit === 'function') crowdForm.onSubmit();
+                    } catch (e) {}
+                }
+                // 3b. Standard <form>.requestSubmit() / submit() as final fallback
+                var form = btn.form || closestAcrossShadow(btn, function (n) {
+                    return n.tagName && n.tagName.toLowerCase() === 'form';
+                });
+                if (form && location.href === _preSubmitHref) {
+                    log('Backup form.requestSubmit/submit');
+                    try {
+                        if (typeof form.requestSubmit === 'function') form.requestSubmit();
+                        else form.submit();
+                    } catch (e) {}
                 }
             } catch (e) {}
-        }, 1200);
+        }, 1500);
 
         return true;
     }
