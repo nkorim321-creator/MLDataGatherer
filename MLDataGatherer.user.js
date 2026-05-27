@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. Auto-reloads queue every 1 min with white-page protection. Captcha detection ported from NMSH VACUUM.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -23,8 +23,8 @@
     var TARGET_TITLE_TAG    = '(prod)';                          // additional safety check
     var QUEUE_URL           = 'https://worker.mturk.com/tasks';
     var RELOAD_INTERVAL_MS  = 60 * 1000;                         // 1 minute
-    var SUBMIT_DELAY_MS     = 2000;                              // wait before clicking Submit
-    var POST_SUBMIT_WAIT_MS = 6000;                              // if still on task page, force back to queue
+    var SUBMIT_DELAY_MS     = 3500;                              // wait before clicking Submit (React form needs time)
+    var POST_SUBMIT_WAIT_MS = 8000;                              // if still on task page, force back to queue
     var WHITE_PAGE_WAIT_MS  = 10000;                             // how long to wait before deciding page is blank
     var WORK_CLICK_DELAY_MS = 1500;                              // wait after queue load before clicking Work
 
@@ -242,59 +242,156 @@
         return true;
     }
 
+    // Search by text "Submit" across buttons / inputs / anchors / role=button / clickable divs/spans.
+    // We pick the most-likely-clickable ancestor when the matched element is plain text.
     function findSubmitButton(root) {
         if (!root) return null;
-        var nodes;
-        try { nodes = root.querySelectorAll('button, input[type="submit"], input[type="button"], a'); }
-        catch (e) { return null; }
-        for (var i = 0; i < nodes.length; i++) {
-            var el = nodes[i];
-            var lbl = (el.textContent || el.value || '').trim();
-            if (/^\s*submit\s*$/i.test(lbl)) return el;
+        var candidates = [];
+
+        // 1) Strong selectors first (id / type / class containing submit)
+        var strong = [
+            '#submitButton',
+            'input[type="submit"]',
+            'button[type="submit"]',
+            '[id*="submit" i]',
+            '[class*="submitButton" i]',
+            '[class*="submit-button" i]',
+            '[name*="submit" i]',
+            '[data-testid*="submit" i]'
+        ];
+        for (var s = 0; s < strong.length; s++) {
+            try {
+                var hits = root.querySelectorAll(strong[s]);
+                for (var i = 0; i < hits.length; i++) candidates.push(hits[i]);
+            } catch (e) {}
+        }
+
+        // 2) Wider net by element type + label text
+        try {
+            var widen = root.querySelectorAll('button, input[type="submit"], input[type="button"], a, [role="button"], div[role="button"], span[role="button"]');
+            for (var j = 0; j < widen.length; j++) {
+                var el = widen[j];
+                var lbl = (el.value || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+                if (/^submit$/i.test(lbl)) candidates.push(el);
+            }
+        } catch (e) {}
+
+        // 3) Last resort: any element whose visible text is exactly "Submit" — climb to clickable parent
+        try {
+            var all = root.querySelectorAll('div, span, p, h1, h2, h3, h4, h5, h6');
+            for (var k = 0; k < all.length; k++) {
+                if (all[k].children && all[k].children.length) continue;  // leaf nodes only
+                var t = (all[k].textContent || '').replace(/\s+/g, ' ').trim();
+                if (/^submit$/i.test(t)) {
+                    var p = all[k];
+                    for (var hop = 0; hop < 5 && p; hop++) {
+                        if (p.tagName === 'BUTTON' || p.tagName === 'A' || p.tagName === 'INPUT' ||
+                            (p.getAttribute && (p.getAttribute('role') === 'button' || p.onclick))) {
+                            candidates.push(p); break;
+                        }
+                        p = p.parentElement;
+                    }
+                    candidates.push(all[k]);  // text element itself as final fallback
+                }
+            }
+        } catch (e) {}
+
+        // Pick first candidate that is visible & enabled
+        for (var c = 0; c < candidates.length; c++) {
+            var el2 = candidates[c];
+            if (!el2 || el2.disabled) continue;
+            var rect = el2.getBoundingClientRect ? el2.getBoundingClientRect() : null;
+            if (rect && rect.width > 0 && rect.height > 0) return el2;
+        }
+        // If nothing visible, return first candidate so caller can still attempt
+        return candidates.length ? candidates[0] : null;
+    }
+
+    // Fire a real MouseEvent — required because React listens on synthetic events
+    // and a bare `.click()` on a custom <button> sometimes no-ops.
+    function fireClick(el) {
+        if (!el) return false;
+        try {
+            var ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window, button: 0 });
+            el.dispatchEvent(ev);
+        } catch (e) {}
+        try { el.click(); } catch (e) {}
+        return true;
+    }
+
+    function findSubmitAnywhere() {
+        // Main document
+        var btn = findSubmitButton(document);
+        if (btn) return btn;
+        // Same-origin iframes (any depth-1)
+        var frames = document.querySelectorAll('iframe, frame');
+        for (var i = 0; i < frames.length; i++) {
+            try {
+                var doc = frames[i].contentDocument;
+                if (!doc) continue;
+                var b = findSubmitButton(doc);
+                if (b) return b;
+                // Depth-2
+                var inner = doc.querySelectorAll('iframe, frame');
+                for (var j = 0; j < inner.length; j++) {
+                    try {
+                        var doc2 = inner[j].contentDocument;
+                        if (!doc2) continue;
+                        var b2 = findSubmitButton(doc2);
+                        if (b2) return b2;
+                    } catch (e2) {}
+                }
+            } catch (e) { /* cross-origin */ }
         }
         return null;
     }
 
     function clickSubmit() {
-        // Main document first
-        var btn = findSubmitButton(document);
-        if (!btn) {
-            // Then any same-origin iframe (Onphase form sometimes ships its own Submit)
-            var iframes = document.querySelectorAll('iframe');
-            for (var i = 0; i < iframes.length; i++) {
-                try {
-                    var doc = iframes[i].contentDocument;
-                    if (doc) { btn = findSubmitButton(doc); if (btn) break; }
-                } catch (e) { /* cross-origin */ }
-            }
-        }
+        var btn = findSubmitAnywhere();
         if (!btn) return false;
 
-        log('Clicking Submit');
-        try { btn.click(); }
-        catch (e) {
+        log('Submit button located — clicking');
+        showBadge('task · submit');
+        fireClick(btn);
+
+        // Belt-and-suspenders: also submit the form if there is one
+        setTimeout(function () {
             try {
-                var form = btn.form || btn.closest('form');
-                if (form) form.submit();
-            } catch (e2) { log('Submit fallback failed: ' + e2.message); return false; }
-        }
+                var form = btn.form || (btn.closest && btn.closest('form'));
+                if (form && /\/projects\/.+\/tasks\//.test(location.pathname)) {
+                    log('Backup form.submit()');
+                    try { form.submit(); } catch (e) {}
+                }
+            } catch (e) {}
+        }, 800);
+
         return true;
     }
 
+    var _submitAttempts = 0;
+    var _submitMaxAttempts = 30;       // ~45s of retries at 1.5s
     function submitAndReturn() {
         if (captchaSystem.captchaActive) {
+            showBadge('task · captcha');
             log('Captcha active — submit deferred');
             setTimeout(submitAndReturn, 3000);
             return;
         }
         if (!pageIsTargetTask()) {
+            showBadge('task · skip (not target)');
             log('Not the target task — staying idle');
             return;
         }
         var clicked = clickSubmit();
         if (!clicked) {
-            // Retry while page is still rendering
-            log('Submit not found yet — retrying');
+            _submitAttempts++;
+            showBadge('task · finding submit (' + _submitAttempts + ')');
+            log('Submit not found yet — retry ' + _submitAttempts);
+            if (_submitAttempts >= _submitMaxAttempts) {
+                log('Gave up finding Submit — returning to queue');
+                safeReload();
+                return;
+            }
             setTimeout(submitAndReturn, 1500);
             return;
         }
