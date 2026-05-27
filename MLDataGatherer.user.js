@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.6
+// @version      1.7-dryrun
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. Auto-reloads queue every 1 min with white-page protection. Captcha detection ported from NMSH VACUUM.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -18,6 +18,11 @@
     // ============================================================
     //  CONFIG — only act on this requester + title
     // ============================================================
+    // DRY_RUN: when true, the script NEVER clicks Submit/Work, NEVER
+    // navigates away. It only observes and writes detailed diagnostic
+    // logs. Set to false once we've confirmed the click targeting works.
+    var DRY_RUN = true;
+
     var TARGET_REQUESTER = 'MLDataGatherer';
     var TARGET_TITLE_PREFIX = 'Smart Capture Invoice Review';   // matches "... - (prod)" or "... - (..."
     var TARGET_TITLE_TAG    = '(prod)';                          // additional safety check
@@ -60,6 +65,10 @@
     // without submitting orphans the HIT, which MTurk auto-returns after 60 min — exactly
     // the symptom the worker has been hitting.
     function safeReload(reason){
+        if (DRY_RUN){
+            log('safeReload SKIPPED (DRY_RUN) reason=' + (reason || '?'));
+            return false;
+        }
         if (isOnTaskPage()){
             log('safeReload BLOCKED (on task page) reason=' + (reason || '?'));
             return false;
@@ -241,6 +250,10 @@
                 var href  = (el.getAttribute && el.getAttribute('href')) || '';
                 var isWork = /^\s*work\s*$/i.test(label) || /\/projects\/.+\/tasks\//.test(href);
                 if (isWork) {
+                    if (DRY_RUN) {
+                        log('Target HIT found — WOULD click Work (DRY_RUN) href=' + href + ' label="' + label + '"');
+                        return true;
+                    }
                     log('Target HIT found — clicking Work');
                     try {
                         if (href && href.indexOf('/projects/') > -1) {
@@ -439,6 +452,10 @@
     // Dispatch a full pointer sequence so React onClick handlers always fire.
     function fireClick(el) {
         if (!el) return false;
+        if (DRY_RUN) {
+            log('fireClick SKIPPED (DRY_RUN) on ' + describeEl(el));
+            return false;
+        }
         var doc = el.ownerDocument || document;
         var win = (doc && doc.defaultView) || window;
         var seq = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
@@ -451,6 +468,25 @@
         }
         try { el.click(); } catch (e) {}
         return true;
+    }
+
+    // Compact human-readable description of an element for logs
+    function describeEl(el){
+        if (!el) return '(null)';
+        var s = (el.tagName || '').toLowerCase();
+        if (el.id) s += '#' + el.id;
+        if (el.className && typeof el.className === 'string') s += '.' + el.className.trim().split(/\s+/).slice(0,2).join('.');
+        var attrs = [];
+        if (el.getAttribute){
+            ['data-testid','role','type','aria-label','form-action','variant','name','value','href'].forEach(function(a){
+                var v = el.getAttribute(a);
+                if (v) attrs.push(a + '="' + v.slice(0,30) + '"');
+            });
+        }
+        if (attrs.length) s += '[' + attrs.join(' ') + ']';
+        var tx = (el.textContent || el.value || '').replace(/\s+/g,' ').trim().slice(0, 30);
+        if (tx) s += ' txt="' + tx + '"';
+        return s;
     }
 
     // Track last URL to detect successful navigation after click
@@ -502,22 +538,28 @@
                     return n.tagName && n.tagName.toLowerCase() === 'crowd-form';
                 });
                 if (crowdForm) {
-                    log('Backup crowd-form.submit()');
-                    try {
-                        if (typeof crowdForm.submit === 'function') crowdForm.submit();
-                        else if (typeof crowdForm.onSubmit === 'function') crowdForm.onSubmit();
-                    } catch (e) {}
+                    if (DRY_RUN) log('Backup crowd-form.submit() SKIPPED (DRY_RUN) on ' + describeEl(crowdForm));
+                    else {
+                        log('Backup crowd-form.submit()');
+                        try {
+                            if (typeof crowdForm.submit === 'function') crowdForm.submit();
+                            else if (typeof crowdForm.onSubmit === 'function') crowdForm.onSubmit();
+                        } catch (e) {}
+                    }
                 }
                 // 3b. Standard <form>.requestSubmit() / submit() as final fallback
                 var form = btn.form || closestAcrossShadow(btn, function (n) {
                     return n.tagName && n.tagName.toLowerCase() === 'form';
                 });
                 if (form && location.href === _preSubmitHref) {
-                    log('Backup form.requestSubmit/submit');
-                    try {
-                        if (typeof form.requestSubmit === 'function') form.requestSubmit();
-                        else form.submit();
-                    } catch (e) {}
+                    if (DRY_RUN) log('Backup form.requestSubmit/submit SKIPPED (DRY_RUN) on ' + describeEl(form));
+                    else {
+                        log('Backup form.requestSubmit/submit');
+                        try {
+                            if (typeof form.requestSubmit === 'function') form.requestSubmit();
+                            else form.submit();
+                        } catch (e) {}
+                    }
                 }
             } catch (e) {}
         }, 1500);
@@ -703,11 +745,17 @@
         setTimeout(function () {
             try {
                 var cf = btn.closest && btn.closest('crowd-form');
-                if (cf && typeof cf.submit === 'function') { log('iframe: crowd-form.submit()'); cf.submit(); }
+                if (cf && typeof cf.submit === 'function') {
+                    if (DRY_RUN) log('iframe: crowd-form.submit() SKIPPED (DRY_RUN) on ' + describeEl(cf));
+                    else { log('iframe: crowd-form.submit()'); cf.submit(); }
+                }
                 var f  = btn.form || (btn.closest && btn.closest('form'));
                 if (f) {
-                    log('iframe: form.requestSubmit/submit');
-                    try { if (typeof f.requestSubmit === 'function') f.requestSubmit(); else f.submit(); } catch (e) {}
+                    if (DRY_RUN) log('iframe: form.requestSubmit/submit SKIPPED (DRY_RUN) on ' + describeEl(f));
+                    else {
+                        log('iframe: form.requestSubmit/submit');
+                        try { if (typeof f.requestSubmit === 'function') f.requestSubmit(); else f.submit(); } catch (e) {}
+                    }
                 }
             } catch (e) {}
         }, 1200);
@@ -722,14 +770,17 @@
         }, 6000);
     }
 
+    var V = '1.7-dryrun' + (DRY_RUN ? ' [DRY-RUN]' : '');
     function main() {
-        log('v1.6 loaded on ' + location.pathname + (window.top !== window ? ' (iframe)' : ' (top)'));
+        log('=========================================');
+        log('v' + V + ' loaded on ' + location.pathname + (window.top !== window ? ' (iframe)' : ' (top)'));
+        if (DRY_RUN) log('DRY_RUN=true — NO clicks, NO navigation, NO submits will happen. Observe-only mode.');
         captchaSystem.watch();
 
         // IFRAME context — we're inside the HIT's Crowd-HTML iframe. Attack
         // the crowd-button locally (no cross-boundary DOM walks needed).
         if (isInsideHitIframe()) {
-            log('Inside HIT iframe — verifying parent then auto-submitting');
+            log('Inside HIT iframe — verifying parent then ' + (DRY_RUN ? 'observing only' : 'auto-submitting'));
             setTimeout(iframeSubmitLoop, 2500);
             return;
         }
@@ -738,9 +789,14 @@
 
         if (isQueuePage()) {
             log('Queue page');
-            showBadge('v1.6 queue · auto');
-            whitePageGuard();
-            startQueueAutoReload();
+            showBadge('v' + V + ' queue');
+            // In DRY_RUN we skip auto-reload too, so logs aren't wiped.
+            if (!DRY_RUN) {
+                whitePageGuard();
+                startQueueAutoReload();
+            } else {
+                log('Queue auto-reload DISABLED (DRY_RUN)');
+            }
             setTimeout(findAndClickWork, WORK_CLICK_DELAY_MS);
             // Re-scan every few seconds in case the row appears late
             setInterval(function () { if (isQueuePage()) findAndClickWork(); }, 5000);
@@ -749,13 +805,13 @@
 
         if (isTaskPage()) {
             log('Task page — LOCKED, will never auto-return');
-            showBadge('v1.6 task · LOCKED');
+            showBadge('v' + V + ' task');
             setTimeout(submitAndReturn, SUBMIT_DELAY_MS);
             return;
         }
 
         log('Idle on ' + location.pathname);
-        showBadge('v1.6 idle');
+        showBadge('v' + V + ' idle');
     }
 
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
