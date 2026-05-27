@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.4
+// @version      1.5
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. Auto-reloads queue every 1 min with white-page protection. Captcha detection ported from NMSH VACUUM.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -37,9 +37,19 @@
     function log(msg, lvl){ try { console.log(TAG + ' ' + msg); } catch(e){} }
     function txt(el){ return (el && (el.innerText || el.textContent) || '').replace(/\s+/g,' ').trim(); }
     function bust(url){ return url + (url.indexOf('?') > -1 ? '&' : '?') + '_=' + now(); }
-    function safeReload(){
+    function isOnTaskPage(){ return /\/projects\/.+\/tasks\//.test(location.pathname); }
+    // HARD SAFEGUARD: refuse to navigate away while a task is open. Leaving a task page
+    // without submitting orphans the HIT, which MTurk auto-returns after 60 min — exactly
+    // the symptom the worker has been hitting.
+    function safeReload(reason){
+        if (isOnTaskPage()){
+            log('safeReload BLOCKED (on task page) reason=' + (reason || '?'));
+            return false;
+        }
+        log('safeReload reason=' + (reason || '?'));
         try { location.replace(bust(QUEUE_URL)); }
         catch(e){ try { location.href = QUEUE_URL; } catch(e2){ try { location.reload(); } catch(e3){} } }
+        return true;
     }
 
     // ============================================================
@@ -150,7 +160,7 @@
                 var t = (els[i].textContent || els[i].value || '');
                 if (t.indexOf('Continue') > -1) { try { els[i].click(); } catch (e) {} break; }
             }
-            setTimeout(safeReload, 1500);
+            setTimeout(function(){ safeReload('server-busy'); }, 1500);
             return true;
         }
         return false;
@@ -177,7 +187,7 @@
             if (captchaSystem.captchaActive) return;
             if (isWhitePage()) {
                 log('White/blank page detected — forcing full reload');
-                safeReload();
+                safeReload('white-page');
             }
         }, WHITE_PAGE_WAIT_MS);
     }
@@ -540,9 +550,11 @@
         setInterval(function () {
             if (captchaSystem.captchaActive) return;
             if (now() - lastReloadAt < RELOAD_INTERVAL_MS - 500) return;
+            // Extra guard: if user navigated away to a task page in the meantime, stop.
+            if (isOnTaskPage()) return;
             lastReloadAt = now();
             log('Queue auto-reload tick');
-            safeReload();
+            safeReload('queue-tick');
         }, RELOAD_INTERVAL_MS);
     }
 
@@ -572,12 +584,13 @@
     }
 
     function main() {
+        log('v1.5 loaded on ' + location.pathname);
         captchaSystem.watch();
         handleServerBusy();
 
         if (isQueuePage()) {
             log('Queue page');
-            showBadge('queue · auto');
+            showBadge('v1.5 queue · auto');
             whitePageGuard();
             startQueueAutoReload();
             setTimeout(findAndClickWork, WORK_CLICK_DELAY_MS);
@@ -587,14 +600,14 @@
         }
 
         if (isTaskPage()) {
-            log('Task page');
-            showBadge('task · checking');
+            log('Task page — LOCKED, will never auto-return');
+            showBadge('v1.5 task · LOCKED');
             setTimeout(submitAndReturn, SUBMIT_DELAY_MS);
             return;
         }
 
         log('Idle on ' + location.pathname);
-        showBadge('idle');
+        showBadge('v1.5 idle');
     }
 
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
