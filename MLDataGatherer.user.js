@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. Auto-reloads queue every 1 min with white-page protection. Captcha detection ported from NMSH VACUUM.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -242,134 +242,135 @@
         return true;
     }
 
-    // Search by text "Submit" across buttons / inputs / anchors / role=button / clickable divs/spans.
-    // We pick the most-likely-clickable ancestor when the matched element is plain text.
-    function findSubmitButton(root) {
-        if (!root) return null;
-        var candidates = [];
-
-        // 1) Strong selectors first (id / type / class containing submit)
-        var strong = [
-            '#submitButton',
-            'input[type="submit"]',
-            'button[type="submit"]',
-            '[id*="submit" i]',
-            '[class*="submitButton" i]',
-            '[class*="submit-button" i]',
-            '[name*="submit" i]',
-            '[data-testid*="submit" i]'
-        ];
-        for (var s = 0; s < strong.length; s++) {
+    // Collect every root we can reach: main document + same-origin iframes + open shadow roots.
+    function collectRoots() {
+        var roots = [document];
+        function pushFrames(rootDoc) {
+            var frames;
+            try { frames = rootDoc.querySelectorAll('iframe, frame'); } catch (e) { return; }
+            for (var i = 0; i < frames.length; i++) {
+                try {
+                    var doc = frames[i].contentDocument;
+                    if (doc && roots.indexOf(doc) === -1) {
+                        roots.push(doc);
+                        pushFrames(doc);
+                    } else if (!doc) {
+                        log('iframe cross-origin: ' + (frames[i].src || '(no src)'));
+                    }
+                } catch (e) { log('iframe blocked: ' + (frames[i].src || '(no src)')); }
+            }
+        }
+        function pushShadow(node) {
             try {
-                var hits = root.querySelectorAll(strong[s]);
-                for (var i = 0; i < hits.length; i++) candidates.push(hits[i]);
+                if (node.shadowRoot && roots.indexOf(node.shadowRoot) === -1) roots.push(node.shadowRoot);
+                var kids = node.querySelectorAll ? node.querySelectorAll('*') : [];
+                for (var i = 0; i < kids.length; i++) {
+                    if (kids[i].shadowRoot && roots.indexOf(kids[i].shadowRoot) === -1) {
+                        roots.push(kids[i].shadowRoot);
+                    }
+                }
             } catch (e) {}
         }
-
-        // 2) Wider net by element type + label text
-        try {
-            var widen = root.querySelectorAll('button, input[type="submit"], input[type="button"], a, [role="button"], div[role="button"], span[role="button"]');
-            for (var j = 0; j < widen.length; j++) {
-                var el = widen[j];
-                var lbl = (el.value || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
-                if (/^submit$/i.test(lbl)) candidates.push(el);
-            }
-        } catch (e) {}
-
-        // 3) Last resort: any element whose visible text is exactly "Submit" — climb to clickable parent
-        try {
-            var all = root.querySelectorAll('div, span, p, h1, h2, h3, h4, h5, h6');
-            for (var k = 0; k < all.length; k++) {
-                if (all[k].children && all[k].children.length) continue;  // leaf nodes only
-                var t = (all[k].textContent || '').replace(/\s+/g, ' ').trim();
-                if (/^submit$/i.test(t)) {
-                    var p = all[k];
-                    for (var hop = 0; hop < 5 && p; hop++) {
-                        if (p.tagName === 'BUTTON' || p.tagName === 'A' || p.tagName === 'INPUT' ||
-                            (p.getAttribute && (p.getAttribute('role') === 'button' || p.onclick))) {
-                            candidates.push(p); break;
-                        }
-                        p = p.parentElement;
-                    }
-                    candidates.push(all[k]);  // text element itself as final fallback
-                }
-            }
-        } catch (e) {}
-
-        // Pick first candidate that is visible & enabled
-        for (var c = 0; c < candidates.length; c++) {
-            var el2 = candidates[c];
-            if (!el2 || el2.disabled) continue;
-            var rect = el2.getBoundingClientRect ? el2.getBoundingClientRect() : null;
-            if (rect && rect.width > 0 && rect.height > 0) return el2;
-        }
-        // If nothing visible, return first candidate so caller can still attempt
-        return candidates.length ? candidates[0] : null;
+        pushFrames(document);
+        for (var r = 0; r < roots.length; r++) pushShadow(roots[r]);
+        return roots;
     }
 
-    // Fire a real MouseEvent — required because React listens on synthetic events
-    // and a bare `.click()` on a custom <button> sometimes no-ops.
-    function fireClick(el) {
+    function isVisible(el) {
         if (!el) return false;
         try {
-            var ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window, button: 0 });
-            el.dispatchEvent(ev);
-        } catch (e) {}
-        try { el.click(); } catch (e) {}
-        return true;
+            if (el.disabled) return false;
+            var rect = el.getBoundingClientRect();
+            if (rect.width <= 1 || rect.height <= 1) return false;
+            // Some libraries hide via opacity / visibility — check computed style
+            var doc = el.ownerDocument || document;
+            var win = doc.defaultView || window;
+            if (win && win.getComputedStyle) {
+                var st = win.getComputedStyle(el);
+                if (st && (st.visibility === 'hidden' || st.display === 'none' || parseFloat(st.opacity || '1') < 0.1)) return false;
+            }
+            return true;
+        } catch (e) { return true; }
     }
 
-    function findSubmitAnywhere() {
-        // Main document
-        var btn = findSubmitButton(document);
-        if (btn) return btn;
-        // Same-origin iframes (any depth-1)
-        var frames = document.querySelectorAll('iframe, frame');
-        for (var i = 0; i < frames.length; i++) {
-            try {
-                var doc = frames[i].contentDocument;
-                if (!doc) continue;
-                var b = findSubmitButton(doc);
-                if (b) return b;
-                // Depth-2
-                var inner = doc.querySelectorAll('iframe, frame');
-                for (var j = 0; j < inner.length; j++) {
-                    try {
-                        var doc2 = inner[j].contentDocument;
-                        if (!doc2) continue;
-                        var b2 = findSubmitButton(doc2);
-                        if (b2) return b2;
-                    } catch (e2) {}
-                }
-            } catch (e) { /* cross-origin */ }
+    // XPath text match — handles <button><span>Submit</span></button>, nested whitespace, etc.
+    function xpathFindSubmit(root) {
+        var doc = (root === document || root.nodeType === 9) ? root : (root.ownerDocument || document);
+        // Use `.` (string-value of node) which collects all descendant text and normalizes whitespace.
+        var expr =
+            ".//button[normalize-space(.)='Submit']" +
+            " | .//input[(@type='submit' or @type='button') and (normalize-space(@value)='Submit' or normalize-space(.)='Submit')]" +
+            " | .//a[normalize-space(.)='Submit']" +
+            " | .//*[@role='button' and normalize-space(.)='Submit']" +
+            " | .//*[@aria-label='Submit' or @aria-label='submit']" +
+            " | .//*[@id='submitButton' or @id='submit-button']";
+        var ctx = (root === document) ? document.documentElement : root;
+        if (!ctx || !ctx.ownerDocument && root !== document) return [];
+        try {
+            var iter = doc.evaluate(expr, ctx, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+            var out = [];
+            for (var i = 0; i < iter.snapshotLength; i++) out.push(iter.snapshotItem(i));
+            return out;
+        } catch (e) { log('xpath err: ' + e.message); return []; }
+    }
+
+    function findSubmitButton() {
+        var roots = collectRoots();
+        for (var r = 0; r < roots.length; r++) {
+            var hits = xpathFindSubmit(roots[r]);
+            // Prefer visible candidates
+            for (var i = 0; i < hits.length; i++) if (isVisible(hits[i])) return hits[i];
+            // Fall back to first hit even if hidden (might still be clickable in React)
+            if (hits.length) return hits[0];
         }
         return null;
     }
 
+    // Dispatch a full pointer sequence so React onClick handlers always fire.
+    function fireClick(el) {
+        if (!el) return false;
+        var doc = el.ownerDocument || document;
+        var win = (doc && doc.defaultView) || window;
+        var seq = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+        for (var i = 0; i < seq.length; i++) {
+            try {
+                var Ctor = (seq[i].indexOf('pointer') === 0) ? (win.PointerEvent || win.MouseEvent) : win.MouseEvent;
+                var ev = new Ctor(seq[i], { bubbles: true, cancelable: true, view: win, button: 0 });
+                el.dispatchEvent(ev);
+            } catch (e) {}
+        }
+        try { el.click(); } catch (e) {}
+        return true;
+    }
+
+    // Track last URL to detect successful navigation after click
+    var _preSubmitHref = '';
+
     function clickSubmit() {
-        var btn = findSubmitAnywhere();
+        var btn = findSubmitButton();
         if (!btn) return false;
 
-        log('Submit button located — clicking');
-        showBadge('task · submit');
+        var tag = btn.tagName + (btn.id ? '#' + btn.id : '') + (btn.className ? '.' + (typeof btn.className === 'string' ? btn.className.split(' ').slice(0,2).join('.') : '') : '');
+        log('Submit located: ' + tag + ' | text="' + ((btn.textContent || btn.value || '').trim().slice(0, 40)) + '"');
+        showBadge('task · clicking submit');
+        _preSubmitHref = location.href;
         fireClick(btn);
 
-        // Belt-and-suspenders: also submit the form if there is one
+        // Backup form.submit() — only if a form wraps the button
         setTimeout(function () {
             try {
                 var form = btn.form || (btn.closest && btn.closest('form'));
-                if (form && /\/projects\/.+\/tasks\//.test(location.pathname)) {
+                if (form && location.href === _preSubmitHref && /\/projects\/.+\/tasks\//.test(location.pathname)) {
                     log('Backup form.submit()');
                     try { form.submit(); } catch (e) {}
                 }
             } catch (e) {}
-        }, 800);
+        }, 1200);
 
         return true;
     }
 
     var _submitAttempts = 0;
-    var _submitMaxAttempts = 30;       // ~45s of retries at 1.5s
     function submitAndReturn() {
         if (captchaSystem.captchaActive) {
             showBadge('task · captcha');
@@ -386,21 +387,21 @@
         if (!clicked) {
             _submitAttempts++;
             showBadge('task · finding submit (' + _submitAttempts + ')');
-            log('Submit not found yet — retry ' + _submitAttempts);
-            if (_submitAttempts >= _submitMaxAttempts) {
-                log('Gave up finding Submit — returning to queue');
-                safeReload();
-                return;
-            }
-            setTimeout(submitAndReturn, 1500);
+            if (_submitAttempts % 5 === 1) log('Submit not found — retry ' + _submitAttempts);
+            // NEVER auto-return the HIT. Just keep retrying for as long as the HIT is open.
+            // Worker can manually submit if script truly fails.
+            setTimeout(submitAndReturn, 2000);
             return;
         }
-        // If we're still on a task page after a while, hard-return to queue
+        // Verify click actually did something — re-check after wait window.
+        // Only go back to queue if URL changed (real submission happened).
         setTimeout(function () {
-            if (/\/projects\/.+\/tasks\//.test(location.pathname)) {
-                log('Still on task page after submit — forcing back to queue');
-                safeReload();
-            }
+            if (location.href !== _preSubmitHref) return;             // already navigated by MTurk
+            if (!/\/projects\/.+\/tasks\//.test(location.pathname)) return;
+            // Still on the same task page — click probably failed silently. Retry instead of leaving.
+            log('Post-submit: still on task page — re-trying submit');
+            _submitAttempts = 0;
+            submitAndReturn();
         }, POST_SUBMIT_WAIT_MS);
     }
 
