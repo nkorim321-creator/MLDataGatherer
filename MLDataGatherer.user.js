@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.7-dryrun
-// @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. Auto-reloads queue every 1 min with white-page protection. Captcha detection ported from NMSH VACUUM.
+// @version      1.8-dryrun
+// @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. The HIT form is rendered in a cross-origin SageMaker iframe, so the script also runs there and waits for a postMessage auth signal from the worker.mturk.com parent before clicking.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
 // @match        https://www.mturk.com/*
+// @match        https://*.public-workforce.*.sagemaker.aws/*
+// @match        https://*.sagemaker.aws/work*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_notification
@@ -52,11 +54,36 @@
         var line = '[' + tsNow() + '] ' + msg;
         try { console.log(TAG + ' ' + line); } catch(e){}
         try {
+            var prefix = (window.top !== window)
+                ? ('(' + (location.hostname || 'iframe') + ') ')
+                : '';
             var buf = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
-            buf.push((window.top !== window ? '(iframe) ' : '') + line);
+            buf.push(prefix + line);
             if (buf.length > LOG_MAX) buf = buf.slice(-LOG_MAX);
             localStorage.setItem(LOG_KEY, JSON.stringify(buf));
         } catch(e){}
+        // If we're in an iframe, also forward to the parent so the log viewer
+        // running on worker.mturk.com shows a unified timeline.
+        if (window.top !== window) {
+            try { window.parent.postMessage({ type: 'MLDG_LOG', line: line, origin: location.hostname }, '*'); }
+            catch(e){}
+        }
+    }
+
+    // Parent-side relay: capture iframe log lines into our localStorage so the
+    // log viewer shows everything in one place.
+    if (typeof window !== 'undefined' && window.top === window) {
+        try {
+            window.addEventListener('message', function (ev) {
+                if (!ev.data || ev.data.type !== 'MLDG_LOG' || typeof ev.data.line !== 'string') return;
+                try {
+                    var buf = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
+                    buf.push('(' + (ev.data.origin || ev.origin) + ') ' + ev.data.line);
+                    if (buf.length > LOG_MAX) buf = buf.slice(-LOG_MAX);
+                    localStorage.setItem(LOG_KEY, JSON.stringify(buf));
+                } catch (e) {}
+            });
+        } catch (e) {}
     }
     function txt(el){ return (el && (el.innerText || el.textContent) || '').replace(/\s+/g,' ').trim(); }
     function bust(url){ return url + (url.indexOf('?') > -1 ? '&' : '?') + '_=' + now(); }
@@ -430,10 +457,16 @@
         for (var r = 0; r < roots.length; r++) {
             var hits = cssFindSubmit(roots[r]);
             if (hits.length) {
-                log('CSS hit in root[' + r + ']: ' + hits.length + ' candidate(s)');
-                // Prefer visible
-                for (var i = 0; i < hits.length; i++) if (isVisible(hits[i])) return hits[i];
-                return hits[0];
+                log('CSS hit in root[' + r + ']: ' + hits.length + ' candidate(s): ' +
+                    hits.slice(0, 4).map(describeEl).join(' || '));
+                for (var i = 0; i < hits.length; i++) {
+                    if (isForbiddenTarget(hits[i])) { log('  skip forbidden: ' + describeEl(hits[i])); continue; }
+                    if (isVisible(hits[i])) return hits[i];
+                }
+                // No visible non-forbidden hit — return first non-forbidden anyway
+                for (var i2 = 0; i2 < hits.length; i2++) {
+                    if (!isForbiddenTarget(hits[i2])) return hits[i2];
+                }
             }
         }
 
@@ -441,17 +474,43 @@
         for (var r2 = 0; r2 < roots.length; r2++) {
             var xhits = xpathFindSubmit(roots[r2]);
             if (xhits.length) {
-                log('XPath hit in root[' + r2 + ']: ' + xhits.length + ' candidate(s)');
-                for (var k = 0; k < xhits.length; k++) if (isVisible(xhits[k])) return xhits[k];
-                return xhits[0];
+                log('XPath hit in root[' + r2 + ']: ' + xhits.length + ' candidate(s): ' +
+                    xhits.slice(0, 4).map(describeEl).join(' || '));
+                for (var k = 0; k < xhits.length; k++) {
+                    if (isForbiddenTarget(xhits[k])) { log('  skip forbidden: ' + describeEl(xhits[k])); continue; }
+                    if (isVisible(xhits[k])) return xhits[k];
+                }
+                for (var k2 = 0; k2 < xhits.length; k2++) {
+                    if (!isForbiddenTarget(xhits[k2])) return xhits[k2];
+                }
             }
         }
         return null;
     }
 
+    // ABSOLUTE GUARD — never click anything labelled Return / Cancel / etc.
+    // v1.6's CSS selector `button[type="submit"]` matched MTurk's "Return"
+    // button (which is technically a submit button for the return-HIT form),
+    // causing the script to return every HIT it touched. We reject these
+    // labels here regardless of which selector matched.
+    var FORBIDDEN_LABEL_RE = /^\s*(return|cancel|back|report\s+this\s+hit|skip|reset|clear|delete|remove|reject|close)\s*$/i;
+    function isForbiddenTarget(el) {
+        if (!el) return true;
+        var t = (el.textContent || el.value || el.getAttribute && el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+        if (FORBIDDEN_LABEL_RE.test(t)) return true;
+        // Also guard against href / form-action that returns/cancels
+        var href = el.getAttribute && el.getAttribute('href') || '';
+        if (/\/return\b|\/cancel\b/i.test(href)) return true;
+        return false;
+    }
+
     // Dispatch a full pointer sequence so React onClick handlers always fire.
     function fireClick(el) {
         if (!el) return false;
+        if (isForbiddenTarget(el)) {
+            log('fireClick REFUSED — forbidden target: ' + describeEl(el));
+            return false;
+        }
         if (DRY_RUN) {
             log('fireClick SKIPPED (DRY_RUN) on ' + describeEl(el));
             return false;
@@ -691,54 +750,83 @@
         var p = location.pathname || '';
         return /\/projects\/.+\/tasks\//.test(p);
     }
-    // The HIT's Crowd-HTML form is rendered inside an iframe whose src is
-    // https://worker.mturk.com/work?ui=...  Detect that we're running inside
-    // that iframe (different from window.top) so we can attack the crowd-button
-    // directly without crossing the iframe boundary from the parent.
-    function isInsideHitIframe() {
+    // True when this script instance is running inside the cross-origin
+    // SageMaker iframe that hosts the Crowd-HTML form.
+    function isSagemakerIframe() {
         if (window.top === window) return false;
-        var p = location.pathname || '';
-        return /^\/work\/?$/.test(p);
+        return /\.sagemaker\.aws$/i.test(location.hostname);
     }
 
-    // Verify the PARENT page is showing the target MLDataGatherer task before
-    // we auto-submit from inside the iframe — otherwise we'd auto-submit any
-    // HIT the worker accepts.
-    function parentIsTargetTask() {
-        try {
-            var parentBody = window.parent.document.body.innerText || '';
-            if (parentBody.indexOf(TARGET_REQUESTER) === -1) return false;
-            if (parentBody.indexOf(TARGET_TITLE_PREFIX) === -1) return false;
-            return true;
-        } catch (e) {
-            log('iframe: parent access blocked (' + e.message + ')');
-            return false;
-        }
-    }
+    // ============================================================
+    //  POSTMESSAGE AUTH PROTOCOL
+    //  Parent on worker.mturk.com confirms "this is MLDataGatherer"
+    //  to the cross-origin SageMaker iframe before the iframe clicks
+    //  Submit. Without this, accepting any other requester's HIT
+    //  whose form happens to be served from SageMaker would be
+    //  auto-submitted — we must not interfere with non-target HITs.
+    // ============================================================
+    var MSG_TYPE_AUTH = 'MLDG_AUTH';
+    var TRUSTED_PARENT_ORIGIN = 'https://worker.mturk.com';
 
-    var _iframeAttempts = 0;
-    function iframeSubmitLoop() {
-        if (parentIsTargetTask() !== true) {
-            // Not a MLDataGatherer task — do nothing, do not interfere.
+    function startParentAuthSignal() {
+        // Verify parent page is the target task first
+        if (!pageIsTargetTask()) {
+            log('parent: not target task, not signalling iframes');
             return;
         }
-        // Look for crowd-button right here in the iframe document
+        log('parent: signalling auth to iframes every 1s');
+        function blast() {
+            var iframes = document.querySelectorAll('iframe');
+            for (var i = 0; i < iframes.length; i++) {
+                try { iframes[i].contentWindow.postMessage({ type: MSG_TYPE_AUTH, ts: now() }, '*'); }
+                catch (e) {}
+            }
+        }
+        blast();
+        setInterval(blast, 1000);
+    }
+
+    var _sagemakerAuthOk = false;
+    var _iframeAttempts = 0;
+    function setupSagemakerListener() {
+        window.addEventListener('message', function (ev) {
+            if (ev.origin !== TRUSTED_PARENT_ORIGIN) return;
+            if (!ev.data || ev.data.type !== MSG_TYPE_AUTH) return;
+            if (!_sagemakerAuthOk) {
+                _sagemakerAuthOk = true;
+                log('sagemaker: AUTH received from ' + ev.origin);
+            }
+        });
+    }
+
+    function sagemakerSubmitLoop() {
+        if (!_sagemakerAuthOk) {
+            _iframeAttempts++;
+            if (_iframeAttempts % 5 === 1) log('sagemaker: waiting for parent auth (try ' + _iframeAttempts + ')');
+            setTimeout(sagemakerSubmitLoop, 1000);
+            return;
+        }
+        // Look for crowd-button right here in this (iframe) document.
         var btn = document.querySelector('crowd-button[data-testid="crowd-submit"]') ||
                   document.querySelector('crowd-button[form-action="submit"]') ||
                   document.querySelector('[data-testid="crowd-submit"]');
         if (!btn) {
             _iframeAttempts++;
-            if (_iframeAttempts % 5 === 1) log('iframe: crowd-button not present yet (try ' + _iframeAttempts + ')');
-            setTimeout(iframeSubmitLoop, 2000);
+            if (_iframeAttempts % 5 === 1) log('sagemaker: crowd-button not present yet (try ' + _iframeAttempts + ')');
+            setTimeout(sagemakerSubmitLoop, 1500);
             return;
         }
-        log('iframe: crowd-button found, firing click');
+        log('sagemaker: crowd-button found: ' + describeEl(btn));
+        if (isForbiddenTarget(btn)) {
+            log('sagemaker: REFUSED — forbidden target');
+            return;
+        }
         _preSubmitHref = location.href;
         fireClick(btn);
         try {
             if (btn.shadowRoot) {
                 var inner = btn.shadowRoot.querySelector('button');
-                if (inner) { log('iframe: shadow-button click'); fireClick(inner); }
+                if (inner) { log('sagemaker: shadow-button click'); fireClick(inner); }
             }
         } catch (e) {}
         // Try <crowd-form>.submit() as belt-and-suspenders
@@ -751,46 +839,47 @@
                 }
                 var f  = btn.form || (btn.closest && btn.closest('form'));
                 if (f) {
-                    if (DRY_RUN) log('iframe: form.requestSubmit/submit SKIPPED (DRY_RUN) on ' + describeEl(f));
+                    if (DRY_RUN) log('sagemaker: form.requestSubmit/submit SKIPPED (DRY_RUN) on ' + describeEl(f));
                     else {
-                        log('iframe: form.requestSubmit/submit');
+                        log('sagemaker: form.requestSubmit/submit');
                         try { if (typeof f.requestSubmit === 'function') f.requestSubmit(); else f.submit(); } catch (e) {}
                     }
                 }
             } catch (e) {}
         }, 1200);
-        // Re-attempt every 6s in case the click was a no-op (parent URL didn't change)
+        // Re-attempt every 6s if the click didn't navigate
         setTimeout(function () {
-            try {
-                if (window.parent && window.parent.location && window.parent.location.href === _preSubmitHref) {
-                    log('iframe: parent URL unchanged, re-trying');
-                    iframeSubmitLoop();
-                }
-            } catch (e) { /* parent navigated away or cross-origin */ }
+            if (location.href === _preSubmitHref) {
+                log('sagemaker: URL unchanged after click, re-trying');
+                sagemakerSubmitLoop();
+            }
         }, 6000);
     }
 
-    var V = '1.7-dryrun' + (DRY_RUN ? ' [DRY-RUN]' : '');
+    var V = '1.8-dryrun' + (DRY_RUN ? ' [DRY-RUN]' : '');
     function main() {
         log('=========================================');
-        log('v' + V + ' loaded on ' + location.pathname + (window.top !== window ? ' (iframe)' : ' (top)'));
+        log('v' + V + ' loaded on ' + location.hostname + location.pathname +
+            (window.top !== window ? ' (iframe)' : ' (top)'));
         if (DRY_RUN) log('DRY_RUN=true — NO clicks, NO navigation, NO submits will happen. Observe-only mode.');
-        captchaSystem.watch();
 
-        // IFRAME context — we're inside the HIT's Crowd-HTML iframe. Attack
-        // the crowd-button locally (no cross-boundary DOM walks needed).
-        if (isInsideHitIframe()) {
-            log('Inside HIT iframe — verifying parent then ' + (DRY_RUN ? 'observing only' : 'auto-submitting'));
-            setTimeout(iframeSubmitLoop, 2500);
+        // SAGEMAKER IFRAME CONTEXT — script is running inside the cross-origin
+        // SageMaker iframe that hosts the Crowd-HTML form. Wait for an auth
+        // postMessage from worker.mturk.com parent, then click crowd-button.
+        if (isSagemakerIframe()) {
+            log('SageMaker iframe context — waiting for parent auth');
+            setupSagemakerListener();
+            setTimeout(sagemakerSubmitLoop, 2500);
             return;
         }
 
+        // Everything below = parent window on worker.mturk.com / www.mturk.com
+        captchaSystem.watch();
         handleServerBusy();
 
         if (isQueuePage()) {
             log('Queue page');
             showBadge('v' + V + ' queue');
-            // In DRY_RUN we skip auto-reload too, so logs aren't wiped.
             if (!DRY_RUN) {
                 whitePageGuard();
                 startQueueAutoReload();
@@ -798,15 +887,18 @@
                 log('Queue auto-reload DISABLED (DRY_RUN)');
             }
             setTimeout(findAndClickWork, WORK_CLICK_DELAY_MS);
-            // Re-scan every few seconds in case the row appears late
             setInterval(function () { if (isQueuePage()) findAndClickWork(); }, 5000);
             return;
         }
 
         if (isTaskPage()) {
-            log('Task page — LOCKED, will never auto-return');
-            showBadge('v' + V + ' task');
-            setTimeout(submitAndReturn, SUBMIT_DELAY_MS);
+            // Parent NEVER tries to find / click Submit directly on the task
+            // page anymore — that's how v1.6 ended up clicking "Return"
+            // (which is `<button type="submit">` in MTurk's UI). Submission is
+            // owned entirely by the SageMaker iframe handler now.
+            log('Task page — signalling SageMaker iframe');
+            showBadge('v' + V + ' task · iframe-signal');
+            startParentAuthSignal();
             return;
         }
 
