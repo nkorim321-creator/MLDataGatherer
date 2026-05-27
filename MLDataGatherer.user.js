@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.8-dryrun
+// @version      1.9
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. The HIT form is rendered in a cross-origin SageMaker iframe, so the script also runs there and waits for a postMessage auth signal from the worker.mturk.com parent before clicking.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -22,8 +22,11 @@
     // ============================================================
     // DRY_RUN: when true, the script NEVER clicks Submit/Work, NEVER
     // navigates away. It only observes and writes detailed diagnostic
-    // logs. Set to false once we've confirmed the click targeting works.
-    var DRY_RUN = true;
+    // logs. v1.8-dryrun diagnostics confirmed click targeting is
+    // correct (crowd-button[data-testid="crowd-submit"] in SageMaker
+    // iframe, no Return-button false positives), so v1.9 ships with
+    // DRY_RUN=false to enable real submission.
+    var DRY_RUN = false;
 
     var TARGET_REQUESTER = 'MLDataGatherer';
     var TARGET_TITLE_PREFIX = 'Smart Capture Invoice Review';   // matches "... - (prod)" or "... - (..."
@@ -856,7 +859,16 @@
         }, 6000);
     }
 
-    var V = '1.8-dryrun' + (DRY_RUN ? ' [DRY-RUN]' : '');
+    var V = '1.9' + (DRY_RUN ? ' [DRY-RUN]' : '');
+    // One-time log wipe on version change so the unified log viewer
+    // is not polluted with messages from older versions.
+    try {
+        var lastVer = localStorage.getItem('mldg_last_ver');
+        if (lastVer !== V) {
+            localStorage.removeItem(LOG_KEY);
+            localStorage.setItem('mldg_last_ver', V);
+        }
+    } catch (e) {}
     function main() {
         log('=========================================');
         log('v' + V + ' loaded on ' + location.hostname + location.pathname +
