@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.11
+// @version      1.12
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. The HIT form is rendered in a cross-origin SageMaker iframe, so the script also runs there and waits for a postMessage auth signal from the worker.mturk.com parent before clicking.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
 // @match        https://www.mturk.com/*
 // @match        https://*.public-workforce.*.sagemaker.aws/*
 // @match        https://*.sagemaker.aws/work*
+// @updateURL    https://raw.githubusercontent.com/nkorim321-creator/MLDataGatherer/claude/quirky-galileo-40UCt/MLDataGatherer.user.js
+// @downloadURL  https://raw.githubusercontent.com/nkorim321-creator/MLDataGatherer/claude/quirky-galileo-40UCt/MLDataGatherer.user.js
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_notification
@@ -913,7 +915,7 @@
         }, 8000);
     }
 
-    var V = '1.11' + (DRY_RUN ? ' [DRY-RUN]' : '');
+    var V = '1.12' + (DRY_RUN ? ' [DRY-RUN]' : '');
     // One-time log wipe on version change so the unified log viewer
     // is not polluted with messages from older versions.
     try {
