@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.10
+// @version      1.11
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. The HIT form is rendered in a cross-origin SageMaker iframe, so the script also runs there and waits for a postMessage auth signal from the worker.mturk.com parent before clicking.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -74,23 +74,49 @@
     }
 
     // Parent-side relay: capture iframe log lines into our localStorage so the
-    // log viewer shows everything in one place.
+    // log viewer shows everything in one place. Also handle MLDG_NAV requests
+    // from the SageMaker iframe so it can ask the parent to navigate to the
+    // queue after submission (the iframe is cross-origin so it can't change
+    // window.top.location itself).
     if (typeof window !== 'undefined' && window.top === window) {
         try {
             window.addEventListener('message', function (ev) {
-                if (!ev.data || ev.data.type !== 'MLDG_LOG' || typeof ev.data.line !== 'string') return;
-                try {
-                    var buf = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
-                    buf.push('(' + (ev.data.origin || ev.origin) + ') ' + ev.data.line);
-                    if (buf.length > LOG_MAX) buf = buf.slice(-LOG_MAX);
-                    localStorage.setItem(LOG_KEY, JSON.stringify(buf));
-                } catch (e) {}
+                if (!ev.data) return;
+                // MLDG_LOG — forward log line to our localStorage
+                if (ev.data.type === 'MLDG_LOG' && typeof ev.data.line === 'string') {
+                    try {
+                        var buf = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
+                        buf.push('(' + (ev.data.origin || ev.origin) + ') ' + ev.data.line);
+                        if (buf.length > LOG_MAX) buf = buf.slice(-LOG_MAX);
+                        localStorage.setItem(LOG_KEY, JSON.stringify(buf));
+                    } catch (e) {}
+                    return;
+                }
+                // MLDG_NAV — iframe is asking us to navigate the top window
+                if (ev.data.type === 'MLDG_NAV' && typeof ev.data.url === 'string') {
+                    // Only accept nav requests from sagemaker.aws iframes
+                    var ok = false;
+                    try { ok = /\.sagemaker\.aws$/i.test(new URL(ev.origin).hostname); } catch (e) {}
+                    if (!ok) return;
+                    // Only allow navigating to the worker.mturk.com queue
+                    if (ev.data.url.indexOf('https://worker.mturk.com/tasks') !== 0) return;
+                    log('Parent received MLDG_NAV from ' + ev.origin + ' → ' + ev.data.url);
+                    setTimeout(function () {
+                        try { location.replace(ev.data.url + (ev.data.url.indexOf('?') > -1 ? '&' : '?') + '_=' + Date.now()); }
+                        catch (e) { try { location.href = ev.data.url; } catch (e2) {} }
+                    }, 500);
+                    return;
+                }
             });
         } catch (e) {}
     }
     function txt(el){ return (el && (el.innerText || el.textContent) || '').replace(/\s+/g,' ').trim(); }
     function bust(url){ return url + (url.indexOf('?') > -1 ? '&' : '?') + '_=' + now(); }
-    function isOnTaskPage(){ return /\/projects\/.+\/tasks\//.test(location.pathname); }
+    function isOnTaskPage(){
+        // Real task page only — exclude the /submit 404 URL so safeReload can
+        // bounce us out of it.
+        return /^\/projects\/[^\/]+\/tasks\/[^\/]+\/?$/.test(location.pathname);
+    }
     // HARD SAFEGUARD: refuse to navigate away while a task is open. Leaving a task page
     // without submitting orphans the HIT, which MTurk auto-returns after 60 min — exactly
     // the symptom the worker has been hitting.
@@ -751,7 +777,16 @@
     }
     function isTaskPage() {
         var p = location.pathname || '';
-        return /\/projects\/.+\/tasks\//.test(p);
+        // Match /projects/{pid}/tasks/{tid} ONLY (not the /submit 404 URL)
+        return /^\/projects\/[^\/]+\/tasks\/[^\/]+\/?$/.test(p);
+    }
+    // After Crowd-HTML submits, MTurk redirects the parent to a URL that
+    // 404s: /projects/{pid}/tasks/{tid}/submit. The externalSubmit POST has
+    // already happened (we see the iframe load), so the HIT submission is
+    // complete — we just need to bounce off this 404 back to the queue.
+    function isPostSubmitPage() {
+        var p = location.pathname || '';
+        return /^\/projects\/[^\/]+\/tasks\/[^\/]+\/submit\/?$/.test(p);
     }
     // True when this script instance is running inside the cross-origin
     // SageMaker iframe that hosts the Crowd-HTML form.
@@ -826,22 +861,45 @@
         }
         _preSubmitHref = location.href;
 
-        // CRITICAL: Click ONLY the host <crowd-button>. Do NOT click the
-        // shadow-root's inner <button>, and do NOT call form.submit() as a
-        // backup. Both bypass Crowd-HTML's interceptor and trigger a raw
-        // form-submit to the HTML form's default `action`, which in this
-        // HIT lands on worker.mturk.com/projects/.../tasks/.../submit
-        // (a 404 page) and orphans the HIT.
-        //
-        // The host click is what Crowd-HTML listens for: it routes the
-        // submission to ${turkSubmitTo}/mturk/externalSubmit, which is the
-        // correct legacy MTurk endpoint that actually accepts the HIT.
-        //
-        // We use fireClick() to dispatch a full pointer/mouse sequence
-        // (some Polymer handlers need pointerdown+up to register) but only
-        // on the host element.
+        // BEFORE clicking, redirect the underlying <form>'s submit target to
+        // a hidden iframe of our own. The form.action is set by the HIT to
+        // a worker.mturk.com URL that 404s — when Crowd-HTML's click handler
+        // fires, the browser's default form-submit also triggers and posts
+        // to that URL with target="_top", navigating the parent to a 404.
+        // Sending the default submit into a hidden iframe makes it a no-op
+        // while leaving Crowd-HTML's own POST to /mturk/externalSubmit
+        // (which still happens via Crowd-HTML's own hidden iframe) intact.
+        try {
+            var form = btn.closest && btn.closest('form');
+            if (form) {
+                var sinkName = 'mldg_sink_' + Date.now();
+                var sink = document.createElement('iframe');
+                sink.name = sinkName;
+                sink.setAttribute('aria-hidden', 'true');
+                sink.style.cssText = 'display:none;width:0;height:0;border:0;visibility:hidden;position:absolute;left:-9999px';
+                (document.body || document.documentElement).appendChild(sink);
+                form.setAttribute('target', sinkName);
+                log('sagemaker: form.target redirected to hidden iframe ' + sinkName + ' (action was: ' + (form.getAttribute('action') || '(none)') + ')');
+            } else {
+                log('sagemaker: no form ancestor for crowd-button (cannot redirect target)');
+            }
+        } catch (e) { log('sagemaker: form-target redirect failed: ' + e.message); }
+
+        // CRITICAL: Click ONLY the host <crowd-button>. Crowd-HTML's own
+        // listener on the host element routes the submission via a hidden
+        // iframe POST to ${turkSubmitTo}/mturk/externalSubmit — the correct
+        // legacy MTurk endpoint that actually accepts the HIT.
         log('sagemaker: firing click on host crowd-button');
         fireClick(btn);
+
+        // Ask the parent to navigate back to the queue. The parent's
+        // postMessage listener checks ev.origin so this is safe.
+        setTimeout(function () {
+            try {
+                window.parent.postMessage({ type: 'MLDG_NAV', url: QUEUE_URL }, TRUSTED_PARENT_ORIGIN);
+                log('sagemaker: sent MLDG_NAV to parent (→ ' + QUEUE_URL + ')');
+            } catch (e) { log('sagemaker: postMessage err: ' + e.message); }
+        }, 3500);
 
         // Verify after 8s. If still on the same URL, retry — but do NOT
         // touch the shadow root or call raw form.submit() this time either.
@@ -855,7 +913,7 @@
         }, 8000);
     }
 
-    var V = '1.10' + (DRY_RUN ? ' [DRY-RUN]' : '');
+    var V = '1.11' + (DRY_RUN ? ' [DRY-RUN]' : '');
     // One-time log wipe on version change so the unified log viewer
     // is not polluted with messages from older versions.
     try {
@@ -884,6 +942,22 @@
         // Everything below = parent window on worker.mturk.com / www.mturk.com
         captchaSystem.watch();
         handleServerBusy();
+
+        // POST-SUBMIT 404 RECOVERY
+        // Crowd-HTML's form-submit lands the parent on
+        // /projects/{pid}/tasks/{tid}/submit, which 404s. The actual HIT
+        // submission happens via a hidden iframe POST to externalSubmit
+        // before this navigation, so the 404 is a UI artefact only — we
+        // just need to bounce off it back to the queue.
+        if (isPostSubmitPage()) {
+            log('Post-submit 404 page — bouncing to queue in 800ms');
+            showBadge('v' + V + ' post-submit → queue');
+            setTimeout(function () {
+                try { location.replace(bust(QUEUE_URL)); }
+                catch (e) { try { location.href = QUEUE_URL; } catch (e2) {} }
+            }, 800);
+            return;
+        }
 
         if (isQueuePage()) {
             log('Queue page');
