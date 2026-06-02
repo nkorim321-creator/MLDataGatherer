@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.12
+// @version      1.13
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. The HIT form is rendered in a cross-origin SageMaker iframe, so the script also runs there and waits for a postMessage auth signal from the worker.mturk.com parent before clicking.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -84,6 +84,13 @@
         try {
             window.addEventListener('message', function (ev) {
                 if (!ev.data) return;
+                var fromSagemaker = false;
+                try { fromSagemaker = /\.sagemaker\.aws$/i.test(new URL(ev.origin).hostname); } catch (e) {}
+                // Any message from sagemaker.aws is proof the iframe-side
+                // script is running there. Used by the "no iframe" warning.
+                if (fromSagemaker && typeof noteIframeResponse === 'function') {
+                    try { noteIframeResponse(ev.origin); } catch (e) {}
+                }
                 // MLDG_LOG — forward log line to our localStorage
                 if (ev.data.type === 'MLDG_LOG' && typeof ev.data.line === 'string') {
                     try {
@@ -96,10 +103,7 @@
                 }
                 // MLDG_NAV — iframe is asking us to navigate the top window
                 if (ev.data.type === 'MLDG_NAV' && typeof ev.data.url === 'string') {
-                    // Only accept nav requests from sagemaker.aws iframes
-                    var ok = false;
-                    try { ok = /\.sagemaker\.aws$/i.test(new URL(ev.origin).hostname); } catch (e) {}
-                    if (!ok) return;
+                    if (!fromSagemaker) return;
                     // Only allow navigating to the worker.mturk.com queue
                     if (ev.data.url.indexOf('https://worker.mturk.com/tasks') !== 0) return;
                     log('Parent received MLDG_NAV from ' + ev.origin + ' → ' + ev.data.url);
@@ -808,6 +812,18 @@
     var MSG_TYPE_AUTH = 'MLDG_AUTH';
     var TRUSTED_PARENT_ORIGIN = 'https://worker.mturk.com';
 
+    // Tracks whether the SageMaker iframe has ever sent us a postMessage.
+    // If we never hear from it, the iframe-side script isn't running there
+    // (typical cause: a payload-loader userscript was installed without
+    // sagemaker.aws in its @match — the loader's eval only fires on the
+    // pages the loader itself matches).
+    var _iframeEverResponded = false;
+    function noteIframeResponse(origin) {
+        if (_iframeEverResponded) return;
+        _iframeEverResponded = true;
+        log('parent: iframe-side script is alive (heard from ' + origin + ')');
+    }
+
     function startParentAuthSignal() {
         // Verify parent page is the target task first
         if (!pageIsTargetTask()) {
@@ -824,6 +840,45 @@
         }
         blast();
         setInterval(blast, 1000);
+
+        // After 10s, if no iframe has responded, the iframe-side script
+        // is not installed. Surface a loud, actionable warning so the
+        // operator can fix their loader rather than silently waiting.
+        setTimeout(function () {
+            if (_iframeEverResponded) return;
+            if (!isOnTaskPage()) return;
+            var sageIframe = null;
+            try {
+                var all = document.querySelectorAll('iframe');
+                for (var i = 0; i < all.length; i++) {
+                    if (all[i].src && /\.sagemaker\.aws/.test(all[i].src)) { sageIframe = all[i]; break; }
+                }
+            } catch (e) {}
+            var iframeSrc = sageIframe ? (sageIframe.src || '(unknown)') : '(no sagemaker iframe in DOM yet)';
+            log('==============================================================');
+            log('WARNING: NO RESPONSE from SageMaker iframe after 10s.');
+            log('The iframe-side handler is NOT running. Auto-submit cannot work.');
+            log('SageMaker iframe src: ' + iframeSrc.slice(0, 140));
+            log('');
+            log('Most likely cause: this script was loaded by a payload/loader');
+            log('userscript whose own @match does NOT include sagemaker.aws.');
+            log('The loader evals our code only on pages where the LOADER runs.');
+            log('');
+            log('FIX: open your loader userscript and add these two @match lines');
+            log('to its UserScript header (next to its existing @match lines):');
+            log('  // @match  https://*.public-workforce.*.sagemaker.aws/*');
+            log('  // @match  https://*.sagemaker.aws/work*');
+            log('Then save the loader and reload the MTurk tab.');
+            log('==============================================================');
+            try { showBadge('v' + V + ' task · ⚠ NO IFRAME — fix loader @match'); } catch (e) {}
+            try {
+                GM_notification({
+                    title: 'MLDataGatherer: iframe script missing',
+                    text: 'Add sagemaker.aws to your loader @match. See console.',
+                    timeout: 15000
+                });
+            } catch (e) {}
+        }, 10000);
     }
 
     var _sagemakerAuthOk = false;
@@ -915,7 +970,7 @@
         }, 8000);
     }
 
-    var V = '1.12' + (DRY_RUN ? ' [DRY-RUN]' : '');
+    var V = '1.13' + (DRY_RUN ? ' [DRY-RUN]' : '');
     // One-time log wipe on version change so the unified log viewer
     // is not polluted with messages from older versions.
     try {
