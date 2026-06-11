@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.13
+// @version      1.14
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. The HIT form is rendered in a cross-origin SageMaker iframe, so the script also runs there and waits for a postMessage auth signal from the worker.mturk.com parent before clicking.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -34,7 +34,12 @@
     var TARGET_TITLE_PREFIX = 'Smart Capture Invoice Review';   // matches "... - (prod)" or "... - (..."
     var TARGET_TITLE_TAG    = '(prod)';                          // additional safety check
     var QUEUE_URL           = 'https://worker.mturk.com/tasks';
-    var RELOAD_INTERVAL_MS  = 60 * 1000;                         // 1 minute
+    // QUEUE_AUTO_RELOAD: reload /tasks every RELOAD_INTERVAL_MS to catch
+    // new HITs. Worker asked for this to be OFF — the queue tab now sits
+    // idle and only the 5s in-page re-scan looks for the target row.
+    // Flip to true to bring the old behaviour back.
+    var QUEUE_AUTO_RELOAD   = false;
+    var RELOAD_INTERVAL_MS  = 60 * 1000;                         // 1 minute (only used when QUEUE_AUTO_RELOAD)
     var SUBMIT_DELAY_MS     = 3500;                              // wait before clicking Submit (React form needs time)
     var POST_SUBMIT_WAIT_MS = 8000;                              // if still on task page, force back to queue
     var WHITE_PAGE_WAIT_MS  = 10000;                             // how long to wait before deciding page is blank
@@ -970,7 +975,7 @@
         }, 8000);
     }
 
-    var V = '1.13' + (DRY_RUN ? ' [DRY-RUN]' : '');
+    var V = '1.14' + (DRY_RUN ? ' [DRY-RUN]' : '');
     // One-time log wipe on version change so the unified log viewer
     // is not polluted with messages from older versions.
     try {
@@ -1021,7 +1026,11 @@
             showBadge('v' + V + ' queue');
             if (!DRY_RUN) {
                 whitePageGuard();
-                startQueueAutoReload();
+                if (QUEUE_AUTO_RELOAD) {
+                    startQueueAutoReload();
+                } else {
+                    log('Queue auto-reload OFF (QUEUE_AUTO_RELOAD=false) — in-page re-scan only');
+                }
             } else {
                 log('Queue auto-reload DISABLED (DRY_RUN)');
             }
