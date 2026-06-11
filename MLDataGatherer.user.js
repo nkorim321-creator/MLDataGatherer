@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.15
+// @version      1.16
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. The HIT form is rendered in a cross-origin SageMaker iframe, so the script also runs there and waits for a postMessage auth signal from the worker.mturk.com parent before clicking.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -153,99 +153,6 @@
         return true;
     }
 
-    // ============================================================
-    //  CAPTCHA SYSTEM (ported from NMSH VACUUM v19)
-    //  When captcha appears: audible alarm, on-screen banner, pause
-    //  auto-submit until human solves it.
-    // ============================================================
-    var captchaSystem = {
-        alertTimer: null,
-        solveTimer: null,
-        captchaActive: false,
-
-        hasCaptchaInText: function (h) {
-            return h ? /captchacharacters|validatecaptcha|\/captcha\/|g-recaptcha|recaptcha-checkbox|captchainput|opfcaptcha/i.test(h) : false;
-        },
-        hasCaptchaOnPage: function () {
-            if (!document.body) return false;
-            if (document.querySelector('img[src*="captcha" i],iframe[src*="recaptcha"],.g-recaptcha,.recaptcha-checkbox-border,input[name="captchacharacters"],form[action*="captcha" i]')) return true;
-            return /captchacharacters|CaptchaInput|validateCaptcha|opfcaptcha/i.test(document.body.innerHTML || '');
-        },
-        playAlert: function () {
-            try {
-                var ctx = new (window.AudioContext || window.webkitAudioContext)();
-                var comp = ctx.createDynamicsCompressor();
-                comp.threshold.value = -3; comp.ratio.value = 15; comp.connect(ctx.destination);
-                [800, 1200, 800, 1200, 600, 1000, 600, 1400].forEach(function (f, i) {
-                    ['square', 'sawtooth'].forEach(function (type) {
-                        var o = ctx.createOscillator(), g = ctx.createGain();
-                        o.type = type; o.frequency.value = f; o.connect(g); g.connect(comp);
-                        var t = ctx.currentTime + i * 0.1;
-                        g.gain.setValueAtTime(type === 'square' ? 0.9 : 0.5, t);
-                        g.gain.exponentialRampToValueAtTime(0.01, t + 0.09);
-                        o.start(t); o.stop(t + 0.09);
-                    });
-                });
-                setTimeout(function () { try { ctx.close(); } catch (e) {} }, 2000);
-            } catch (e) {}
-        },
-        startRepeating: function () {
-            var s = this; this.stopRepeating(); this.playAlert();
-            this.alertTimer = setInterval(function () {
-                if (!s.captchaActive) { s.stopRepeating(); return; }
-                s.playAlert();
-            }, 20000);
-        },
-        stopRepeating: function () {
-            if (this.alertTimer) { clearInterval(this.alertTimer); this.alertTimer = null; }
-        },
-        showOverlay: function () {
-            var ex = document.getElementById('mldg-cap-ov'); if (ex) ex.remove();
-            var ov = document.createElement('div'); ov.id = 'mldg-cap-ov';
-            ov.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647';
-            ov.innerHTML = '<div style="background:#c0392b;color:#fff;padding:10px;text-align:center;font:bold 16px system-ui;box-shadow:0 3px 15px rgba(0,0,0,.4)">CAPTCHA — SOLVE NOW' +
-                '<span style="display:block;font-size:11px;opacity:.8;margin-top:3px">Auto-submit paused — resumes when captcha is solved</span>' +
-                '<button id="mldg-cap-close" style="margin-left:12px;padding:3px 10px;background:#fff;color:#c0392b;border:none;border-radius:3px;font-weight:bold;cursor:pointer">OK</button></div>';
-            if (document.body) {
-                document.body.appendChild(ov);
-                var btn = document.getElementById('mldg-cap-close');
-                if (btn) btn.onclick = function(){ ov.remove(); };
-            }
-        },
-        removeOverlay: function () { var el = document.getElementById('mldg-cap-ov'); if (el) el.remove(); },
-        startSolveMonitor: function () {
-            var s = this;
-            if (this.solveTimer) clearInterval(this.solveTimer);
-            this.solveTimer = setInterval(function () {
-                if (!s.hasCaptchaOnPage()) s.onSolved();
-            }, 500);
-        },
-        onSolved: function () {
-            if (this.solveTimer) { clearInterval(this.solveTimer); this.solveTimer = null; }
-            this.stopRepeating();
-            this.removeOverlay();
-            this.captchaActive = false;
-            log('CAPTCHA solved — resuming');
-            try { GM_notification({ title: 'MLDG', text: 'CAPTCHA solved — resuming', timeout: 4000 }); } catch (e) {}
-        },
-        trigger: function () {
-            if (this.captchaActive) return;
-            this.captchaActive = true;
-            log('CAPTCHA detected — pausing auto-submit');
-            try { GM_notification({ title: 'CAPTCHA!', text: 'Solve to auto-resume', timeout: 30000 }); } catch (e) {}
-            this.showOverlay();
-            this.startRepeating();
-            this.startSolveMonitor();
-        },
-        watch: function () {
-            var s = this;
-            function check() {
-                if (!s.captchaActive && s.hasCaptchaOnPage()) s.trigger();
-            }
-            if (document.body) check();
-            setInterval(check, 2000);
-        }
-    };
 
     // ============================================================
     //  SERVER-BUSY DISMISSER (Amazon "Continue shopping" page)
@@ -285,7 +192,6 @@
     }
     function whitePageGuard() {
         setTimeout(function () {
-            if (captchaSystem.captchaActive) return;
             if (isWhitePage()) {
                 log('White/blank page detected — forcing full reload');
                 safeReload('white-page');
@@ -306,8 +212,6 @@
     }
 
     function findAndClickWork() {
-        if (captchaSystem.captchaActive) return false;
-
         // Each HIT in /tasks renders as a row. Try the common containers.
         var rows = document.querySelectorAll(
             'tr, [class*="task-queue" i] [class*="row" i], [data-react-class] tr, .panel, .row, [class*="task-row" i]'
@@ -675,12 +579,6 @@
 
     var _submitAttempts = 0;
     function submitAndReturn() {
-        if (captchaSystem.captchaActive) {
-            showBadge('task · captcha');
-            log('Captcha active — submit deferred');
-            setTimeout(submitAndReturn, 3000);
-            return;
-        }
         if (!pageIsTargetTask()) {
             showBadge('task · skip (not target)');
             log('Not the target task — staying idle');
@@ -714,7 +612,6 @@
     var lastReloadAt = now();
     function startQueueAutoReload() {
         setInterval(function () {
-            if (captchaSystem.captchaActive) return;
             if (now() - lastReloadAt < RELOAD_INTERVAL_MS - 500) return;
             // Extra guard: if user navigated away to a task page in the meantime, stop.
             if (isOnTaskPage()) return;
@@ -982,7 +879,7 @@
         }, 8000);
     }
 
-    var V = '1.15' + (DRY_RUN ? ' [DRY-RUN]' : '');
+    var V = '1.16' + (DRY_RUN ? ' [DRY-RUN]' : '');
     // One-time log wipe on version change so the unified log viewer
     // is not polluted with messages from older versions.
     try {
@@ -1009,7 +906,6 @@
         }
 
         // Everything below = parent window on worker.mturk.com / www.mturk.com
-        captchaSystem.watch();
         handleServerBusy();
 
         // POST-SUBMIT 404 RECOVERY
