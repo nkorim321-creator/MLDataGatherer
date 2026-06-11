@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataGatherer Auto Submit
 // @namespace    http://violentmonkey.net/
-// @version      1.14
+// @version      1.15
 // @description  Auto-open & submit MLDataGatherer "Smart Capture Invoice Review - (prod)" HITs. The HIT form is rendered in a cross-origin SageMaker iframe, so the script also runs there and waits for a postMessage auth signal from the worker.mturk.com parent before clicking.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
@@ -112,17 +112,25 @@
                     // Only allow navigating to the worker.mturk.com queue
                     if (ev.data.url.indexOf('https://worker.mturk.com/tasks') !== 0) return;
                     log('Parent received MLDG_NAV from ' + ev.origin + ' → ' + ev.data.url);
-                    setTimeout(function () {
-                        try { location.replace(ev.data.url + (ev.data.url.indexOf('?') > -1 ? '&' : '?') + '_=' + Date.now()); }
-                        catch (e) { try { location.href = ev.data.url; } catch (e2) {} }
-                    }, 500);
+                    setTimeout(goToQueue, 500);
                     return;
                 }
             });
         } catch (e) {}
     }
     function txt(el){ return (el && (el.innerText || el.textContent) || '').replace(/\s+/g,' ').trim(); }
-    function bust(url){ return url + (url.indexOf('?') > -1 ? '&' : '?') + '_=' + now(); }
+    // Navigate to the queue WITHOUT a cache-buster. MTurk renders a blank
+    // white page when it sees a fresh ?_=timestamp URL on some Worker IDs,
+    // so: already on /tasks → plain location.reload() (same as a mouse
+    // reload); anywhere else → clean QUEUE_URL with no extra params.
+    function goToQueue(){
+        if (/^\/tasks\/?$/.test(location.pathname)) {
+            try { location.reload(); } catch(e){}
+            return;
+        }
+        try { location.href = QUEUE_URL; }
+        catch(e){ try { location.replace(QUEUE_URL); } catch(e2){} }
+    }
     function isOnTaskPage(){
         // Real task page only — exclude the /submit 404 URL so safeReload can
         // bounce us out of it.
@@ -141,8 +149,7 @@
             return false;
         }
         log('safeReload reason=' + (reason || '?'));
-        try { location.replace(bust(QUEUE_URL)); }
-        catch(e){ try { location.href = QUEUE_URL; } catch(e2){ try { location.reload(); } catch(e3){} } }
+        goToQueue();
         return true;
     }
 
@@ -975,7 +982,7 @@
         }, 8000);
     }
 
-    var V = '1.14' + (DRY_RUN ? ' [DRY-RUN]' : '');
+    var V = '1.15' + (DRY_RUN ? ' [DRY-RUN]' : '');
     // One-time log wipe on version change so the unified log viewer
     // is not polluted with messages from older versions.
     try {
@@ -1014,10 +1021,7 @@
         if (isPostSubmitPage()) {
             log('Post-submit 404 page — bouncing to queue in 800ms');
             showBadge('v' + V + ' post-submit → queue');
-            setTimeout(function () {
-                try { location.replace(bust(QUEUE_URL)); }
-                catch (e) { try { location.href = QUEUE_URL; } catch (e2) {} }
-            }, 800);
+            setTimeout(goToQueue, 800);
             return;
         }
 
