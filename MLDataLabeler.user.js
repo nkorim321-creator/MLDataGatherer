@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataLabeler Auto Submit (Anti-Conflict Version)
 // @namespace    http://tampermonkey.net/
-// @version      10.0
+// @version      10.1
 // @description  Auto-selects a labeling option (Positive/Negative/Neutral or whatever's offered) for MLDataLabeler HITs and clicks the MTurk Submit. Works whether the form is rendered directly on worker.mturk.com OR inside a cross-origin iframe — iframe→parent postMessage handshake coordinates the two layouts. Opens HITs in background tabs to avoid Panda Crazy / Hit Catcher conflicts.
 // @match        https://worker.mturk.com/*
 // @match        https://*.mturkcontent.com/*
@@ -144,20 +144,56 @@
     // sit under the same parent — that's almost always a multi-choice option
     // list. Returns [] if no such group exists (e.g. options live in an
     // iframe we can't see).
+    // Only match real labeling controls. Plain <button>, [role="button"],
+    // <li>, <a>, <div onclick> are too broad — v10.0 matched the page-
+    // footer nav (<li class="nav-item">) as a 6-option group and clicked
+    // "Feedback". Buttons must explicitly look like option/answer/category
+    // controls; everything inside <nav>/<footer>/<header>/.navbar/.nav-*
+    // is dropped.
     function findOptionGroup() {
-        var raw = getElementsDeep(
-            'crowd-radio-button, crowd-button, input[type="radio"], [role="radio"], .category-button, button, [role="button"], li, div[onclick]'
-        );
+        var raw = getElementsDeep([
+            'crowd-radio-button',
+            'crowd-checkbox',
+            'input[type="radio"]',
+            'input[type="checkbox"]',
+            '[role="radio"]',
+            'button.category-button',                 // SageMaker labeling
+            'button[class*="option" i]',
+            'button[class*="answer" i]',
+            'button[class*="category" i]',
+            'button[class*="choice" i]',
+            'button[class*="label" i]',
+            '.category-button',
+            '.option-button',
+            '.answer-button',
+            '.choice-button'
+        ].join(', '));
+
         var pool = [];
         for (var i = 0; i < raw.length; i++) {
             var el = raw[i];
-            if (!isVisible(el)) continue;
-            if (isForbiddenTarget(el)) continue;
-            // Plain <button> with text matching exactly "Submit"/"Submit HIT" is the Submit, not an option.
+            if (!isVisible(el) || isForbiddenTarget(el)) continue;
+            // Drop anything inside a navigation context — that's how
+            // v10.0 picked the footer "Feedback" link.
+            if (el.closest && (
+                el.closest('nav') ||
+                el.closest('footer') ||
+                el.closest('header') ||
+                el.closest('[role="navigation"]') ||
+                el.closest('[role="contentinfo"]') ||
+                el.closest('[role="banner"]') ||
+                el.closest('.navbar') ||
+                el.closest('.footer') ||
+                el.closest('.nav-item') ||
+                el.closest('.nav-link')
+            )) continue;
+            // Plain <button> with exact text "Submit"/"Submit HIT" is the
+            // Submit, not an option.
             var t = (el.textContent || el.value || '').replace(/\s+/g, ' ').trim().toLowerCase();
             if (t === 'submit' || t === 'submit hit' || t === 'submit answer') continue;
             pool.push(el);
         }
+
         var groups = new Map();
         for (var j = 0; j < pool.length; j++) {
             var parent = pool[j].parentElement;
@@ -365,14 +401,19 @@
                     log('Iframe: notified parent (MLDL_SELECTED).');
                 } catch (e) {}
 
-                // If the iframe also has a Submit button, click it after
-                // redirecting form targets so the parent doesn't get
-                // pushed to a /submit 404.
+                // If the iframe also has a Submit button, click it.
+                //
+                // We do NOT redirectFormsToSink() here. SageMaker labeling
+                // forms (awsui-button) submit through the form's real
+                // action endpoint — diverting target to a hidden iframe
+                // (as the v10.0 code did) caused the POST to land in the
+                // sink, and the HIT was never actually submitted. The
+                // parent's STEP 0 /submit-404 recovery catches any stray
+                // navigation if the form does turn out to misroute.
                 setTimeout(function () {
                     var btn = findSubmitButton();
                     if (btn) {
-                        redirectFormsToSink();
-                        log('Iframe: also clicking local Submit ' + describeEl(btn));
+                        log('Iframe: clicking local Submit ' + describeEl(btn));
                         fireHostClick(btn);
                     }
                 }, 900);
