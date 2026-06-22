@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataLabeler Auto Submit (Anti-Conflict Version)
 // @namespace    http://tampermonkey.net/
-// @version      10.3
+// @version      10.4
 // @description  Auto-selects a labeling option (Positive/Negative/Neutral or whatever's offered) for MLDataLabeler HITs and clicks the MTurk Submit. Works whether the form is rendered directly on worker.mturk.com OR inside a cross-origin iframe — iframe→parent postMessage handshake coordinates the two layouts. Opens HITs in background tabs to avoid Panda Crazy / Hit Catcher conflicts.
 // @match        https://worker.mturk.com/*
 // @match        https://*.mturkcontent.com/*
@@ -227,20 +227,27 @@
     // any stray native form-submit (action=/submit) lands in the sink and
     // doesn't 404 the visible tab. MTurk's real submission still goes
     // through MTurk's own button POST below.
+    var _sinkName = null;          // created once, reused — the loop calls this
+    var _lastRedirectLog = 0;      // repeatedly, so don't leak an iframe per call
     function redirectFormsToSink(root) {
         root = root || document;
         try {
-            var sinkName = 'mldl_sink_' + Date.now();
-            var sink = document.createElement('iframe');
-            sink.name = sinkName;
-            sink.setAttribute('aria-hidden', 'true');
-            sink.style.cssText = 'display:none;width:0;height:0;border:0;position:absolute;left:-9999px';
-            (document.body || document.documentElement).appendChild(sink);
+            if (!_sinkName) {
+                _sinkName = 'mldl_sink_' + Date.now();
+                var sink = document.createElement('iframe');
+                sink.name = _sinkName;
+                sink.setAttribute('aria-hidden', 'true');
+                sink.style.cssText = 'display:none;width:0;height:0;border:0;position:absolute;left:-9999px';
+                (document.body || document.documentElement).appendChild(sink);
+            }
             var forms = getElementsDeep('form', root);
             for (var i = 0; i < forms.length; i++) {
-                try { forms[i].setAttribute('target', sinkName); } catch (e) {}
+                try { forms[i].setAttribute('target', _sinkName); } catch (e) {}
             }
-            if (forms.length) log('Redirected ' + forms.length + ' form(s) → ' + sinkName);
+            if (forms.length && Date.now() - _lastRedirectLog > 3000) {
+                log('Redirected ' + forms.length + ' form(s) → ' + _sinkName);
+                _lastRedirectLog = Date.now();
+            }
         } catch (e) {}
     }
 
@@ -411,6 +418,7 @@
         var phase = 'answer';        // 'answer' -> 'submit' -> 'answer' ...
         var phaseSince = Date.now();
         var loopAttempts = 0;
+        var lastSubmitAtP = 0;
 
         setInterval(function () {
             loopAttempts++;
@@ -435,17 +443,20 @@
                 return;
             }
 
-            // phase === 'submit'
-            var btn = findSubmitButton();
-            if (btn && isEnabled(btn)) {
-                log('Parent: clicking Submit ' + describeEl(btn));
-                redirectFormsToSink();
-                fireHostClick(btn);
+            // phase === 'submit' — click at most once per 3s.
+            if (Date.now() - lastSubmitAtP > 3000) {
+                var btn = findSubmitButton();
+                if (btn && isEnabled(btn)) {
+                    log('Parent: clicking Submit ' + describeEl(btn));
+                    redirectFormsToSink();
+                    fireHostClick(btn);
+                    lastSubmitAtP = Date.now();
+                }
             }
-            // After ~2.5s go back to answering — handles the next item in a
+            // After ~3.5s go back to answering — handles the next item in a
             // multi-item HIT; for a single-item HIT the page has already
             // navigated away by now so this is a harmless no-op.
-            if (Date.now() - phaseSince > 2500) { phase = 'answer'; phaseSince = Date.now(); }
+            if (Date.now() - phaseSince > 3500) { phase = 'answer'; phaseSince = Date.now(); }
         }, 1000);
         return;
     }
@@ -493,6 +504,7 @@
         var phase = 'answer';
         var phaseSince = Date.now();
         var lastSelLog = 0;
+        var lastSubmitAt = 0;
 
         setInterval(function () {
             if (!authOK) return;
@@ -513,15 +525,29 @@
                 return;
             }
 
-            // phase === 'submit'
-            var btn = findSubmitButton();
-            if (btn && isEnabled(btn)) {
-                log('Iframe: clicking Submit ' + describeEl(btn));
-                fireHostClick(btn);
-            } else if (btn) {
-                log('Iframe: Submit present but disabled (aria-disabled) — selection not registered yet.');
+            // phase === 'submit' — click at most once per 3s.
+            if (Date.now() - lastSubmitAt > 3000) {
+                var btn = findSubmitButton();
+                if (btn && isEnabled(btn)) {
+                    // CRITICAL: redirect the form's native submit target into
+                    // a hidden iframe BEFORE clicking. The crowd-form / awsui
+                    // submit does a native form-submit with target="_top";
+                    // a cross-origin iframe (sagemaker.aws) is NOT allowed to
+                    // navigate the top frame without a real user gesture, so
+                    // a synthetic click's top-nav is silently blocked and the
+                    // HIT never submits. Pointing target at our own hidden
+                    // iframe makes the navigation same-frame (allowed), while
+                    // Crowd-HTML's real externalSubmit POST still fires. This
+                    // is exactly the fix that made MLDataGatherer work.
+                    redirectFormsToSink();
+                    log('Iframe: clicking Submit ' + describeEl(btn));
+                    fireHostClick(btn);
+                    lastSubmitAt = Date.now();
+                } else if (btn) {
+                    log('Iframe: Submit present but disabled (aria-disabled) — selection not registered yet.');
+                }
             }
-            if (Date.now() - phaseSince > 2500) { phase = 'answer'; phaseSince = Date.now(); }
+            if (Date.now() - phaseSince > 3500) { phase = 'answer'; phaseSince = Date.now(); }
         }, 1000);
         return;
     }
