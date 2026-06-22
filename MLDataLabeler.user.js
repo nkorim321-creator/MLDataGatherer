@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataLabeler Auto Submit (Anti-Conflict Version)
 // @namespace    http://tampermonkey.net/
-// @version      10.4
+// @version      10.5
 // @description  Auto-selects a labeling option (Positive/Negative/Neutral or whatever's offered) for MLDataLabeler HITs and clicks the MTurk Submit. Works whether the form is rendered directly on worker.mturk.com OR inside a cross-origin iframe — iframe→parent postMessage handshake coordinates the two layouts. Opens HITs in background tabs to avoid Panda Crazy / Hit Catcher conflicts.
 // @match        https://worker.mturk.com/*
 // @match        https://*.mturkcontent.com/*
@@ -221,6 +221,77 @@
     function fireHostClick(el) {
         if (!el) return;
         realClick(el);
+    }
+
+    // Bypass the click event entirely and invoke React's onClick prop
+    // directly. Some awsui components check event.isTrusted and refuse to
+    // act on synthetic clicks; calling the registered onClick handler skips
+    // that gate. Walks up a few ancestors because the handler is sometimes
+    // bound to a wrapper, not the visible button.
+    function reactInvokeClick(el) {
+        if (!el) return false;
+        var node = el;
+        for (var hop = 0; hop < 6 && node; hop++) {
+            try {
+                var keys = Object.keys(node);
+                for (var i = 0; i < keys.length; i++) {
+                    if (keys[i].indexOf('__reactProps$') === 0 || keys[i].indexOf('__reactEventHandlers$') === 0) {
+                        var props = node[keys[i]];
+                        if (props && typeof props.onClick === 'function') {
+                            var fakeEv = {
+                                bubbles: true, cancelable: true, isTrusted: true,
+                                type: 'click', target: el, currentTarget: node,
+                                nativeEvent: { isTrusted: true, type: 'click', target: el },
+                                preventDefault: function () {}, stopPropagation: function () {},
+                                stopImmediatePropagation: function () {}, persist: function () {}
+                            };
+                            try {
+                                props.onClick(fakeEv);
+                                log('Iframe: reactInvokeClick succeeded on ' + describeEl(node));
+                                return true;
+                            } catch (e) { log('Iframe: React onClick threw: ' + e.message); }
+                        }
+                    }
+                }
+            } catch (e) {}
+            node = node.parentElement;
+        }
+        return false;
+    }
+
+    // Call form.requestSubmit() / form.submit() on every form in the
+    // document. Last-resort if the button click + react-invoke both fail.
+    // Most useful when SageMaker's submit handler is gated behind a real
+    // user gesture — bypasses the button entirely.
+    function tryAllFormSubmits() {
+        var forms = getElementsDeep('form');
+        if (!forms.length) { log('Iframe: tryAllFormSubmits — no forms found'); return false; }
+        var ok = false;
+        for (var i = 0; i < forms.length; i++) {
+            var f = forms[i];
+            try {
+                log('Iframe: trying form.requestSubmit on ' + describeEl(f) + ' action=' + (f.action || '(none)'));
+                if (typeof f.requestSubmit === 'function') f.requestSubmit();
+                else f.submit();
+                ok = true;
+            } catch (e) { log('Iframe: form submit threw: ' + e.message); }
+        }
+        return ok;
+    }
+
+    // Diagnostic: list every <form> and its action ONCE so the worker can
+    // see what the SageMaker page exposes.
+    var _formsLogged = false;
+    function logFormsOnce() {
+        if (_formsLogged) return;
+        _formsLogged = true;
+        try {
+            var forms = getElementsDeep('form');
+            log('Iframe: ' + forms.length + ' form(s) on page:');
+            for (var i = 0; i < forms.length; i++) {
+                log('  form[' + i + '] action="' + (forms[i].action || '') + '" method="' + (forms[i].method || 'get') + '" target="' + (forms[i].getAttribute('target') || '') + '"');
+            }
+        } catch (e) {}
     }
 
     // Redirect every form's submit target into a throwaway hidden iframe so
@@ -505,12 +576,35 @@
         var phaseSince = Date.now();
         var lastSelLog = 0;
         var lastSubmitAt = 0;
+        var submitAttempt = 0;             // escalation counter for the submit strategies
+        var preSubmitItemId = '';          // identifier of the current item so we can detect it advancing
+
+        // Capture an item-identifier so we can tell whether the page has
+        // actually advanced after a submit attempt. Uses the visible review
+        // / item text (which is unique per item) hashed to ~32 chars.
+        function currentItemSig() {
+            try {
+                var t = (document.body && document.body.innerText) || '';
+                return t.replace(/\s+/g, ' ').slice(0, 200);
+            } catch (e) { return ''; }
+        }
 
         setInterval(function () {
             if (!authOK) return;
 
+            logFormsOnce();
+
             var opts = findOptionGroup();
             if (opts.length < 2) return;   // nothing to answer this tick
+
+            // If the page advanced to a new item since the last submit attempt,
+            // reset the strategy counter so the next item starts fresh.
+            var sig = currentItemSig();
+            if (sig && preSubmitItemId && sig !== preSubmitItemId) {
+                log('Iframe: detected item change — resetting submit strategy.');
+                submitAttempt = 0;
+                preSubmitItemId = '';
+            }
 
             if (phase === 'answer') {
                 if (opts.some(looksSelected)) { phase = 'submit'; phaseSince = Date.now(); return; }
@@ -525,29 +619,55 @@
                 return;
             }
 
-            // phase === 'submit' — click at most once per 3s.
-            if (Date.now() - lastSubmitAt > 3000) {
+            // phase === 'submit' — try escalating strategies once per 4s.
+            // Many awsui Submit handlers check event.isTrusted and ignore
+            // synthetic clicks, so plain button.click can fire repeatedly
+            // with no effect. Each strategy is tried in order; if the page
+            // advances (currentItemSig changes), the counter resets to 0
+            // for the next item. Strategies 0–3 are tried in turn; after
+            // strategy 3 we cycle back to 0 but with longer backoff.
+            if (Date.now() - lastSubmitAt > 4000) {
                 var btn = findSubmitButton();
-                if (btn && isEnabled(btn)) {
-                    // CRITICAL: redirect the form's native submit target into
-                    // a hidden iframe BEFORE clicking. The crowd-form / awsui
-                    // submit does a native form-submit with target="_top";
-                    // a cross-origin iframe (sagemaker.aws) is NOT allowed to
-                    // navigate the top frame without a real user gesture, so
-                    // a synthetic click's top-nav is silently blocked and the
-                    // HIT never submits. Pointing target at our own hidden
-                    // iframe makes the navigation same-frame (allowed), while
-                    // Crowd-HTML's real externalSubmit POST still fires. This
-                    // is exactly the fix that made MLDataGatherer work.
-                    redirectFormsToSink();
-                    log('Iframe: clicking Submit ' + describeEl(btn));
-                    fireHostClick(btn);
-                    lastSubmitAt = Date.now();
-                } else if (btn) {
+                if (!btn) { /* no submit yet — wait */ }
+                else if (!isEnabled(btn)) {
                     log('Iframe: Submit present but disabled (aria-disabled) — selection not registered yet.');
+                } else {
+                    if (!preSubmitItemId) preSubmitItemId = sig;
+                    var step = submitAttempt % 4;
+                    log('Iframe: submit strategy ' + step + ' on ' + describeEl(btn));
+                    try { btn.focus(); } catch (e) {}
+                    if (step === 0) {
+                        // Strategy 0: form-target sink + full pointer-sequence click.
+                        // Crowd-HTML XHR (if any) + native button click path.
+                        redirectFormsToSink();
+                        fireHostClick(btn);
+                    } else if (step === 1) {
+                        // Strategy 1: React onClick prop invoked directly,
+                        // bypassing event.isTrusted gates.
+                        reactInvokeClick(btn);
+                    } else if (step === 2) {
+                        // Strategy 2: form.requestSubmit() on every form
+                        // (some SageMaker forms submit independent of the
+                        // button click path).
+                        tryAllFormSubmits();
+                    } else {
+                        // Strategy 3: keyboard activation — focus the
+                        // button then dispatch Enter / Space. Sometimes
+                        // treated as a separate code-path from mouse click.
+                        try {
+                            ['keydown', 'keypress', 'keyup'].forEach(function (type) {
+                                btn.dispatchEvent(new KeyboardEvent(type, {
+                                    key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+                                    bubbles: true, cancelable: true
+                                }));
+                            });
+                        } catch (e) {}
+                    }
+                    submitAttempt++;
+                    lastSubmitAt = Date.now();
                 }
             }
-            if (Date.now() - phaseSince > 3500) { phase = 'answer'; phaseSince = Date.now(); }
+            if (Date.now() - phaseSince > 5000) { phase = 'answer'; phaseSince = Date.now(); }
         }, 1000);
         return;
     }
