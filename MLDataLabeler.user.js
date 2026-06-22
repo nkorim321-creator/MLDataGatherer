@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataLabeler Auto Submit (Anti-Conflict Version)
 // @namespace    http://tampermonkey.net/
-// @version      10.1
+// @version      10.2
 // @description  Auto-selects a labeling option (Positive/Negative/Neutral or whatever's offered) for MLDataLabeler HITs and clicks the MTurk Submit. Works whether the form is rendered directly on worker.mturk.com OR inside a cross-origin iframe — iframe→parent postMessage handshake coordinates the two layouts. Opens HITs in background tabs to avoid Panda Crazy / Hit Catcher conflicts.
 // @match        https://worker.mturk.com/*
 // @match        https://*.mturkcontent.com/*
@@ -83,40 +83,89 @@
         return s;
     }
 
-    // Select-an-option click — single clean click + change event. No
-    // double-fire, because triple-clicking a toggle can un-select it.
+    // realClick: thorough click simulator for React-aware components like
+    // SageMaker's awsui-button. v10.1's fireHostClick fired only
+    // pointerdown/mousedown/pointerup/mouseup/click — React onClick
+    // handlers that listen for the full hover→press→release sequence
+    // (with proper clientX/clientY and focus) sometimes refuse to react
+    // to a bare event series with origin (0,0). Adds:
+    //  - scrollIntoView + focus so the element is genuinely interactable
+    //  - pointerover/pointerenter/mouseover/mouseenter/pointermove/mousemove
+    //    in the sequence (hover state most React libraries gate on)
+    //  - clientX/clientY = element center so handlers that consult coords
+    //    don't treat the click as "outside the button"
+    //  - buttons=1 throughout the press phase
+    function realClick(el) {
+        if (!el) return;
+        var rect;
+        try { rect = el.getBoundingClientRect(); } catch (e) { rect = { left: 0, top: 0, width: 1, height: 1 }; }
+        var cx = rect.left + rect.width / 2;
+        var cy = rect.top + rect.height / 2;
+
+        try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
+        try { el.focus(); } catch (e) {}
+
+        var doc = el.ownerDocument || document;
+        var win = doc.defaultView || window;
+
+        function dispatch(type, init) {
+            try {
+                var Ctor;
+                if (type.indexOf('pointer') === 0) Ctor = win.PointerEvent || win.MouseEvent;
+                else if (type === 'focus' || type === 'focusin' || type === 'blur' || type === 'focusout') Ctor = win.FocusEvent;
+                else Ctor = win.MouseEvent;
+                var defaults = { bubbles: true, cancelable: true, view: win, button: 0, clientX: cx, clientY: cy };
+                for (var k in init) defaults[k] = init[k];
+                el.dispatchEvent(new Ctor(type, defaults));
+            } catch (e) {}
+        }
+
+        dispatch('focusin');
+        dispatch('focus');
+        dispatch('pointerover', { pointerType: 'mouse' });
+        dispatch('pointerenter', { pointerType: 'mouse' });
+        dispatch('mouseover');
+        dispatch('mouseenter');
+        dispatch('pointermove', { pointerType: 'mouse' });
+        dispatch('mousemove');
+        dispatch('pointerdown', { pointerType: 'mouse', buttons: 1 });
+        dispatch('mousedown', { buttons: 1 });
+        dispatch('pointerup', { pointerType: 'mouse' });
+        dispatch('mouseup');
+        dispatch('click');
+
+        try { el.click(); } catch (e) {}
+    }
+
+    // Option click: realClick + checked + change. React-state-aware option
+    // groups (SageMaker category-button, crowd-radio-button) need the full
+    // sequence so onClick / onChange both fire and the option actually
+    // registers as selected — without that, Submit later does nothing
+    // because React thinks no answer was provided.
     function selectOption(el) {
         if (!el) return;
-        try { el.click(); } catch (e) {}
+        realClick(el);
         try { if ('checked' in el) el.checked = true; } catch (e) {}
+        try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
         try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
-        // For crowd-* custom elements, also click the shadow inner radio/label.
+        // For crowd-* custom elements, also activate the shadow inner control.
         try {
             if (el.shadowRoot) {
                 var inner = el.shadowRoot.querySelector('input[type="radio"], button, label');
                 if (inner) {
-                    try { inner.click(); } catch (e) {}
+                    realClick(inner);
                     if ('checked' in inner) inner.checked = true;
                 }
             }
         } catch (e) {}
     }
 
-    // Submit click — full pointer/mouse sequence on the host element ONLY.
-    // Never the shadow-root inner <button>, because that triggers a native
-    // form-submit to the form's action (often /submit → 404).
+    // Submit click: realClick on host ONLY (never the shadow-root inner
+    // <button>, which would trigger a native form-submit to the form's
+    // relative action and 404).
     function fireHostClick(el) {
         if (!el) return;
-        var doc = el.ownerDocument || document;
-        var win = doc.defaultView || window;
-        var seq = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-        for (var i = 0; i < seq.length; i++) {
-            try {
-                var Ctor = (seq[i].indexOf('pointer') === 0) ? (win.PointerEvent || win.MouseEvent) : win.MouseEvent;
-                el.dispatchEvent(new Ctor(seq[i], { bubbles: true, cancelable: true, view: win, button: 0 }));
-            } catch (e) {}
-        }
-        try { el.click(); } catch (e) {}
+        realClick(el);
     }
 
     // Redirect every form's submit target into a throwaway hidden iframe so
@@ -401,22 +450,51 @@
                     log('Iframe: notified parent (MLDL_SELECTED).');
                 } catch (e) {}
 
-                // If the iframe also has a Submit button, click it.
-                //
-                // We do NOT redirectFormsToSink() here. SageMaker labeling
-                // forms (awsui-button) submit through the form's real
-                // action endpoint — diverting target to a hidden iframe
-                // (as the v10.0 code did) caused the POST to land in the
-                // sink, and the HIT was never actually submitted. The
+                // Click the iframe's Submit. We do NOT redirectFormsToSink()
+                // here — SageMaker labeling forms (awsui-button) submit
+                // through the form's real action endpoint, and diverting
+                // target to a hidden iframe (v10.0) made the POST land in
+                // the sink so the HIT never actually got submitted. The
                 // parent's STEP 0 /submit-404 recovery catches any stray
                 // navigation if the form does turn out to misroute.
+                //
+                // 1500ms is up from v10.1's 900ms so React has time to
+                // commit the option-selected state before Submit is
+                // queried; with the old delay Submit could fire while
+                // React still treats the form as unanswered.
+                var preSubmitHref = location.href;
                 setTimeout(function () {
                     var btn = findSubmitButton();
-                    if (btn) {
-                        log('Iframe: clicking local Submit ' + describeEl(btn));
-                        fireHostClick(btn);
-                    }
-                }, 900);
+                    if (!btn) { log('Iframe: no Submit button found after option-select.'); return; }
+                    log('Iframe: clicking local Submit ' + describeEl(btn));
+                    fireHostClick(btn);
+
+                    // Fallback: if the click didn't actually submit (some
+                    // React components require requestSubmit on the form
+                    // rather than a synthetic click on the button), try
+                    // form.requestSubmit() and form.submit() 1.5s later
+                    // when the URL hasn't changed.
+                    setTimeout(function () {
+                        if (location.href !== preSubmitHref) return;
+                        try {
+                            var form = btn.form || (btn.closest && btn.closest('form'));
+                            if (!form) { log('Iframe: post-click URL unchanged and no <form> ancestor — giving up.'); return; }
+                            log('Iframe: URL unchanged after click → form.requestSubmit() fallback on ' + describeEl(form));
+                            try {
+                                if (typeof form.requestSubmit === 'function') form.requestSubmit(btn);
+                                else form.submit();
+                            } catch (e) { log('Iframe: requestSubmit failed: ' + e.message); }
+                        } catch (e) {}
+                    }, 1500);
+
+                    // Final guard: 6s after the click, if the URL still
+                    // hasn't moved, log it so we can see this happened.
+                    setTimeout(function () {
+                        if (location.href === preSubmitHref) {
+                            log('Iframe: WARNING — 6s after submit click, URL is still ' + location.href.slice(0, 80));
+                        }
+                    }, 6000);
+                }, 1500);
 
                 submitted = true;
                 clearInterval(tick2);
