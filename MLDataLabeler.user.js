@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MLDataLabeler Auto Submit (Anti-Conflict Version)
 // @namespace    http://tampermonkey.net/
-// @version      10.2
+// @version      10.3
 // @description  Auto-selects a labeling option (Positive/Negative/Neutral or whatever's offered) for MLDataLabeler HITs and clicks the MTurk Submit. Works whether the form is rendered directly on worker.mturk.com OR inside a cross-origin iframe — iframe→parent postMessage handshake coordinates the two layouts. Opens HITs in background tabs to avoid Panda Crazy / Hit Catcher conflicts.
 // @match        https://worker.mturk.com/*
 // @match        https://*.mturkcontent.com/*
@@ -81,6 +81,61 @@
         var t = (el.textContent || el.value || '').replace(/\s+/g, ' ').trim().slice(0, 30);
         if (t) s += ' txt="' + t + '"';
         return s;
+    }
+
+    // Does this element look "selected/pressed/checked"? awsui category
+    // buttons don't expose a native .checked — they flip aria-pressed /
+    // aria-checked / aria-selected and add a class (selected/active/
+    // checked/pressed or an awsui primary-variant class). Check the element
+    // and one level of descendants.
+    function looksSelected(el) {
+        if (!el) return false;
+        function one(n) {
+            if (!n || !n.getAttribute) return false;
+            if (n.getAttribute('aria-pressed') === 'true') return true;
+            if (n.getAttribute('aria-checked') === 'true') return true;
+            if (n.getAttribute('aria-selected') === 'true') return true;
+            if (n.checked === true) return true;
+            var c = (typeof n.className === 'string' ? n.className : '').toLowerCase();
+            if (/\b(selected|active|checked|pressed)\b/.test(c)) return true;
+            if (/awsui-button-variant-primary/.test(c)) return true;
+            return false;
+        }
+        if (one(el)) return true;
+        try {
+            var kids = el.querySelectorAll ? el.querySelectorAll('*') : [];
+            for (var i = 0; i < kids.length && i < 8; i++) if (one(kids[i])) return true;
+        } catch (e) {}
+        return false;
+    }
+
+    // Is this control actually clickable? awsui marks buttons unusable with
+    // aria-disabled="true" and/or a -disabled class, NOT the native
+    // .disabled property — so a plain .disabled check (as in isVisible)
+    // wrongly treats them as enabled.
+    function isEnabled(el) {
+        if (!el) return false;
+        try {
+            if (el.disabled === true) return false;
+            if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return false;
+            var c = (typeof el.className === 'string' ? el.className : '').toLowerCase();
+            if (/\b(disabled|is-disabled|awsui-button-disabled)\b/.test(c)) return false;
+            return true;
+        } catch (e) { return true; }
+    }
+
+    // True if this page embeds the labeling iframe (SageMaker / mturkcontent).
+    // When it does, the parent must NOT try to select/submit itself — the
+    // iframe owns that — it only relays the auth handshake.
+    function hasTaskIframe() {
+        try {
+            var ifr = document.querySelectorAll('iframe, frame');
+            for (var i = 0; i < ifr.length; i++) {
+                var src = ifr[i].src || '';
+                if (/\.sagemaker\.aws|\.mturkcontent\.com|\.s3\.amazonaws\.com/.test(src)) return true;
+            }
+        } catch (e) {}
+        return false;
     }
 
     // realClick: thorough click simulator for React-aware components like
@@ -331,74 +386,67 @@
     //     postMessage, then click Submit on this page
     // ==========================================================
     if (isTaskPageParent) {
-        log('Parent task page — waiting to confirm MLDataLabeler.');
+        log('Parent task page — confirming MLDataLabeler...');
 
         var isMLDataLabeler = false;
-        var optionSelected  = false;
-        var optionSelectedAt = 0;
-        var submitClicked   = false;
-        var attempts        = 0;
 
-        // 1. Handle iframe handshake + selection notifications.
+        // Always relay the auth handshake to iframes (so the SageMaker
+        // iframe can proceed). Only reply once we've confirmed this is a
+        // MLDataLabeler task by the requester name in the page chrome.
         window.addEventListener('message', function (ev) {
-            if (!ev.data || !ev.data.type) return;
-            if (ev.data.type === MSG_QUERY) {
-                if (isMLDataLabeler) {
-                    try { ev.source.postMessage({ type: MSG_OK }, ev.origin); } catch (e) {}
-                }
-                return;
-            }
-            if (ev.data.type === MSG_SELECTED) {
-                log('Iframe (' + ev.origin + ') reported option selection.');
-                if (!optionSelected) {
-                    optionSelected = true;
-                    optionSelectedAt = Date.now();
-                }
+            if (!ev.data || ev.data.type !== MSG_QUERY) return;
+            if (isMLDataLabeler) {
+                try { ev.source.postMessage({ type: MSG_OK }, ev.origin); } catch (e) {}
             }
         });
 
-        function maybeSubmit() {
-            if (submitClicked || !optionSelected) return;
-            if (Date.now() - optionSelectedAt < 700) return;  // brief settle
-            var btn = findSubmitButton();
-            if (!btn) return;
-            log('Clicking Submit on parent: ' + describeEl(btn));
-            redirectFormsToSink();
-            fireHostClick(btn);
-            submitClicked = true;
-            log('✅ Submit dispatched.');
-        }
+        // ANSWER→SUBMIT LOOP. Runs continuously so multi-item HITs (one
+        // HIT = many records, each submit loads the next record in place
+        // with NO url change) get every item answered, not just the first.
+        // The loop ends naturally when the page finally navigates away.
+        //
+        // If the page embeds the SageMaker/mturkcontent iframe, the parent
+        // does NOT select/submit — the iframe owns that. The parent only
+        // relays auth above.
+        var phase = 'answer';        // 'answer' -> 'submit' -> 'answer' ...
+        var phaseSince = Date.now();
+        var loopAttempts = 0;
 
-        var tick = setInterval(function () {
-            if (submitClicked) { clearInterval(tick); return; }
-            attempts++;
+        setInterval(function () {
+            loopAttempts++;
 
             var bodyText = document.body ? document.body.textContent : '';
             isMLDataLabeler = bodyText.indexOf(TARGET_REQUESTER) !== -1;
-            if (!isMLDataLabeler) {
-                if (attempts > 40) { clearInterval(tick); log('Not a MLDataLabeler task — giving up.'); }
+            if (!isMLDataLabeler) return;
+
+            // Iframe-hosted HIT → defer entirely to the iframe.
+            if (hasTaskIframe()) return;
+
+            var opts = findOptionGroup();
+            if (opts.length < 2) return;   // nothing answerable right now
+
+            if (phase === 'answer') {
+                if (opts.some(looksSelected)) { phase = 'submit'; phaseSince = Date.now(); return; }
+                var idx = Math.floor(Math.random() * opts.length);
+                log('Parent: ' + opts.length + ' options — selecting ' + idx + ' (' + describeEl(opts[idx]) + ')');
+                selectOption(opts[idx]);
+                // Move on even if selection can't be confirmed after ~1.5s.
+                if (Date.now() - phaseSince > 1500) { phase = 'submit'; phaseSince = Date.now(); }
                 return;
             }
 
-            // Try to select an option directly on this page.
-            if (!optionSelected) {
-                var opts = findOptionGroup();
-                if (opts.length >= 2) {
-                    var idx = Math.floor(Math.random() * opts.length);
-                    log('Parent: ' + opts.length + ' options visible — selecting index ' + idx + ' (' + describeEl(opts[idx]) + ')');
-                    selectOption(opts[idx]);
-                    optionSelected = true;
-                    optionSelectedAt = Date.now();
-                }
+            // phase === 'submit'
+            var btn = findSubmitButton();
+            if (btn && isEnabled(btn)) {
+                log('Parent: clicking Submit ' + describeEl(btn));
+                redirectFormsToSink();
+                fireHostClick(btn);
             }
-
-            maybeSubmit();
-
-            if (attempts > 80) {
-                clearInterval(tick);
-                log('Parent: gave up after 80 attempts. optionSelected=' + optionSelected + ' submitClicked=' + submitClicked);
-            }
-        }, 500);
+            // After ~2.5s go back to answering — handles the next item in a
+            // multi-item HIT; for a single-item HIT the page has already
+            // navigated away by now so this is a harmless no-op.
+            if (Date.now() - phaseSince > 2500) { phase = 'answer'; phaseSince = Date.now(); }
+        }, 1000);
         return;
     }
 
@@ -412,9 +460,7 @@
     if (inIframe) {
         log('Inside iframe — ' + host + path);
 
-        var authOK    = false;
-        var submitted = false;
-        var queryTimer = null;
+        var authOK = false;
 
         window.addEventListener('message', function (ev) {
             if (ev.origin !== TRUSTED_PARENT_ORIGIN) return;
@@ -425,84 +471,58 @@
             }
         });
 
-        queryTimer = setInterval(function () {
-            if (authOK || submitted) { clearInterval(queryTimer); return; }
+        // Keep asking the parent for auth until granted.
+        setInterval(function () {
+            if (authOK) return;
             try { window.parent.postMessage({ type: MSG_QUERY }, '*'); } catch (e) {}
         }, 1000);
 
-        var attempts2 = 0;
-        var tick2 = setInterval(function () {
-            if (submitted) { clearInterval(tick2); return; }
-            attempts2++;
-            if (!authOK) {
-                if (attempts2 > 30) { clearInterval(tick2); log('Iframe: no parent auth after 30 ticks — idle.'); }
+        // ANSWER→SUBMIT LOOP (mirrors the parent loop). SageMaker labeling
+        // HITs are usually MULTI-ITEM: one HIT = many records, each Submit
+        // loads the next record in the SAME iframe with NO url change.
+        // v10.2 stopped after the first item (submitted=true), so the
+        // remaining items stayed blank and the HIT was never completed.
+        // This loop answers EVERY item until the iframe finally navigates
+        // away (HIT complete).
+        //
+        // Per item: phase 'answer' selects a random option and waits for it
+        // to register (looksSelected) or ~1.5s; phase 'submit' clicks the
+        // Submit button only when it's actually enabled (awsui uses
+        // aria-disabled, which isEnabled() checks) then cycles back to
+        // 'answer' for the next record.
+        var phase = 'answer';
+        var phaseSince = Date.now();
+        var lastSelLog = 0;
+
+        setInterval(function () {
+            if (!authOK) return;
+
+            var opts = findOptionGroup();
+            if (opts.length < 2) return;   // nothing to answer this tick
+
+            if (phase === 'answer') {
+                if (opts.some(looksSelected)) { phase = 'submit'; phaseSince = Date.now(); return; }
+                var idx = Math.floor(Math.random() * opts.length);
+                if (Date.now() - lastSelLog > 700) {
+                    log('Iframe: ' + opts.length + ' options — selecting ' + idx + ' (' + describeEl(opts[idx]) + ')');
+                    lastSelLog = Date.now();
+                }
+                selectOption(opts[idx]);
+                try { window.parent.postMessage({ type: MSG_SELECTED }, TRUSTED_PARENT_ORIGIN); } catch (e) {}
+                if (Date.now() - phaseSince > 1500) { phase = 'submit'; phaseSince = Date.now(); }
                 return;
             }
 
-            var opts = findOptionGroup();
-            if (opts.length >= 2) {
-                var idx = Math.floor(Math.random() * opts.length);
-                log('Iframe: ' + opts.length + ' options — selecting ' + idx + ' (' + describeEl(opts[idx]) + ')');
-                selectOption(opts[idx]);
-
-                try {
-                    window.parent.postMessage({ type: MSG_SELECTED }, TRUSTED_PARENT_ORIGIN);
-                    log('Iframe: notified parent (MLDL_SELECTED).');
-                } catch (e) {}
-
-                // Click the iframe's Submit. We do NOT redirectFormsToSink()
-                // here — SageMaker labeling forms (awsui-button) submit
-                // through the form's real action endpoint, and diverting
-                // target to a hidden iframe (v10.0) made the POST land in
-                // the sink so the HIT never actually got submitted. The
-                // parent's STEP 0 /submit-404 recovery catches any stray
-                // navigation if the form does turn out to misroute.
-                //
-                // 1500ms is up from v10.1's 900ms so React has time to
-                // commit the option-selected state before Submit is
-                // queried; with the old delay Submit could fire while
-                // React still treats the form as unanswered.
-                var preSubmitHref = location.href;
-                setTimeout(function () {
-                    var btn = findSubmitButton();
-                    if (!btn) { log('Iframe: no Submit button found after option-select.'); return; }
-                    log('Iframe: clicking local Submit ' + describeEl(btn));
-                    fireHostClick(btn);
-
-                    // Fallback: if the click didn't actually submit (some
-                    // React components require requestSubmit on the form
-                    // rather than a synthetic click on the button), try
-                    // form.requestSubmit() and form.submit() 1.5s later
-                    // when the URL hasn't changed.
-                    setTimeout(function () {
-                        if (location.href !== preSubmitHref) return;
-                        try {
-                            var form = btn.form || (btn.closest && btn.closest('form'));
-                            if (!form) { log('Iframe: post-click URL unchanged and no <form> ancestor — giving up.'); return; }
-                            log('Iframe: URL unchanged after click → form.requestSubmit() fallback on ' + describeEl(form));
-                            try {
-                                if (typeof form.requestSubmit === 'function') form.requestSubmit(btn);
-                                else form.submit();
-                            } catch (e) { log('Iframe: requestSubmit failed: ' + e.message); }
-                        } catch (e) {}
-                    }, 1500);
-
-                    // Final guard: 6s after the click, if the URL still
-                    // hasn't moved, log it so we can see this happened.
-                    setTimeout(function () {
-                        if (location.href === preSubmitHref) {
-                            log('Iframe: WARNING — 6s after submit click, URL is still ' + location.href.slice(0, 80));
-                        }
-                    }, 6000);
-                }, 1500);
-
-                submitted = true;
-                clearInterval(tick2);
-            } else if (attempts2 > 60) {
-                clearInterval(tick2);
-                log('Iframe: no option group found after 60 ticks — idle.');
+            // phase === 'submit'
+            var btn = findSubmitButton();
+            if (btn && isEnabled(btn)) {
+                log('Iframe: clicking Submit ' + describeEl(btn));
+                fireHostClick(btn);
+            } else if (btn) {
+                log('Iframe: Submit present but disabled (aria-disabled) — selection not registered yet.');
             }
-        }, 500);
+            if (Date.now() - phaseSince > 2500) { phase = 'answer'; phaseSince = Date.now(); }
+        }, 1000);
         return;
     }
 
