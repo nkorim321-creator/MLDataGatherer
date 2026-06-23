@@ -9,6 +9,8 @@
 // @allFrames    true
 // @grant        GM_openInTab
 // @grant        window.close
+// @updateURL    https://raw.githubusercontent.com/nkorim321-creator/MLDataGatherer/main/MLDataLabeler.user.js
+// @downloadURL  https://raw.githubusercontent.com/nkorim321-creator/MLDataGatherer/main/MLDataLabeler.user.js
 // ==/UserScript==
 
 (function() {
