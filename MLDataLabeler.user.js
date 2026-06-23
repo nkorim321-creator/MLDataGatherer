@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         MLDataLabeler Auto Submit (HasanBhai Timing Fix)
+// @name         MLDataLabeler Auto Submit (Weighted Selection)
 // @namespace    http://tampermonkey.net/
-// @version      20.0
-// @description  Wait exactly 1200ms, force remove disabled attributes, then click. 
+// @version      21.0
+// @description  Wait exactly 1200ms, force remove disabled attributes. Selects options with 95% (1st), 3% (2nd), and 2% (3rd) probability.
 // @match        https://worker.mturk.com/*
 // @match        https://*.mturkcontent.com/*
 // @match        https://*.sagemaker.aws/*
@@ -73,7 +73,29 @@
 
             if (options.length >= 2) {
                 clearInterval(taskInterval);
-                const targetOption = options[Math.floor(Math.random() * options.length)];
+                
+                // ==========================================================
+                // THE PERCENTAGE SELECTION LOGIC (95% - 3% - 2%)
+                // ==========================================================
+                let selectedIndex = 0;
+                let rand = Math.random() * 100; // ০ থেকে ১০০ এর মধ্যে র‍্যান্ডম নম্বর
+                
+                if (options.length >= 3) {
+                    if (rand < 95) {
+                        selectedIndex = 0; // ৯৫% সম্ভাবনা (১ম অপশন)
+                    } else if (rand < 98) {
+                        selectedIndex = 1; // ৩% সম্ভাবনা (২য় অপশন)
+                    } else {
+                        selectedIndex = 2; // ২% সম্ভাবনা (৩য় অপশন)
+                    }
+                } else if (options.length === 2) {
+                    // যদি অপশন ২টা থাকে, তাহলে ৯৫% ১ম টা, ৫% ২য় টা
+                    if (rand < 95) selectedIndex = 0;
+                    else selectedIndex = 1;
+                }
+                
+                const targetOption = options[selectedIndex];
+                console.log(`[MLDataLabeler] Probability Score: ${rand.toFixed(2)}. Selected Option: ${selectedIndex + 1}`);
                 
                 // 1. অপশন সিলেক্ট করা
                 targetOption.click();
@@ -114,7 +136,7 @@
                         // 5. সেফটি ক্লোজ (সাবমিট হওয়ার ৩ সেকেন্ড পর মেইন ট্যাব কেটে দেবে)
                         setTimeout(() => window.top.postMessage("mldl_close", "*"), 3000);
                     }
-                }, 1200); // EXACT 1200ms delay just like HasanBhai's script
+                }, 1200); // EXACT 1200ms delay
 
             }
         }, 500);
