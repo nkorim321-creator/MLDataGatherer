@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         MLDataLabeler Auto Submit (Compact UI & AI Radar)
+// @name         MLDataLabeler Auto Submit (Ultra Mini UI)
 // @namespace    http://tampermonkey.net/
-// @version      33.0
-// @description  Resized dashboard for a compact view. Accepts both legacy (AIza) and new (AQ.) Google API Keys.
+// @version      34.0
+// @description  Drastically reduced dashboard size to prevent overlapping MTurk content.
 // @match        https://worker.mturk.com/*
 // @match        https://*.mturkcontent.com/*
 // @match        https://*.sagemaker.aws/*
@@ -177,26 +177,24 @@
     startAccessControl();
 
     // ==========================================
-    // QUEUE PAGE LOGIC (Main Tab - Compact Dashboard)
+    // QUEUE PAGE LOGIC (Main Tab - Ultra Mini Dashboard)
     // ==========================================
     if (window.location.href.includes('worker.mturk.com/tasks') && !window.location.href.includes('/projects/') && window.self === window.top) {
         
         const uiDiv = document.createElement('div');
-        // COMPACT UI DESIGN - Reduced width, height, and padding
+        // ULTRA MINI UI DESIGN (Width: 220px, greatly reduced height)
         uiDiv.innerHTML = `
-            <div style="position:fixed; bottom:15px; left:15px; width:280px; background:#0f172a; padding:10px; border-radius:8px; border:2px solid #3b82f6; color:#f1f5f9; z-index:999999; font-family:sans-serif; font-size:11px; box-shadow: 0px 4px 15px rgba(0,0,0,0.7);">
-                <b style="color:#60a5fa; font-size:12px;">📊 MLDataLabeler Dashboard</b><br>
+            <div style="position:fixed; bottom:15px; left:15px; width:220px; background:#0f172a; padding:8px; border-radius:6px; border:2px solid #3b82f6; color:#f1f5f9; z-index:999999; font-family:sans-serif; box-shadow: 0px 4px 10px rgba(0,0,0,0.7);">
+                <b style="color:#60a5fa; font-size:11px;">📊 MLDataLabeler Mini</b>
                 
-                <div style="margin-top:6px;">
-                    <span style="font-size:10px; color:#94a3b8;">User API Key Pool (Admin default if empty):</span>
-                    <textarea id="ml_api_keys" style="width:100%; height:30px; margin-top:2px; background:#1e293b; color:#10b981; border:1px solid #475569; border-radius:4px; font-size:9px; padding:4px;" placeholder="Paste API Key here..."></textarea>
-                    <button id="ml_save_keys" style="margin-top:2px; width:100%; background:#3b82f6; color:white; border:none; padding:4px; cursor:pointer; font-weight:bold; border-radius:4px;">💾 Save Keys</button>
+                <div style="margin-top:4px;">
+                    <textarea id="ml_api_keys" style="width:100%; height:25px; background:#1e293b; color:#10b981; border:1px solid #475569; border-radius:3px; font-size:9px; padding:3px; resize:none;" placeholder="API Key (Blank = Admin)"></textarea>
+                    <button id="ml_save_keys" style="margin-top:2px; width:100%; background:#3b82f6; color:white; border:none; padding:4px; cursor:pointer; font-weight:bold; border-radius:3px; font-size:9px;">💾 Save</button>
                 </div>
                 
-                <div style="margin-top:6px;">
-                    <span style="font-size:10px; color:#94a3b8;">Live Task Logs:</span>
-                    <textarea id="mldl-log-box" style="width:100%; height:160px; margin-top:2px; background:#000; color:#00ff00; border:1px solid #444; font-family:monospace; font-size:10px; padding:4px; resize:none;" readonly></textarea>
-                    <button id="mldl-clear-btn" style="margin-top:2px; width:100%; background:#dc3545; color:white; border:none; padding:4px; cursor:pointer; font-weight:bold; border-radius:4px;">🗑️ Clear Logs</button>
+                <div style="margin-top:4px;">
+                    <textarea id="mldl-log-box" style="width:100%; height:90px; background:#000; color:#00ff00; border:1px solid #444; font-family:monospace; font-size:9px; padding:3px; resize:none;" readonly></textarea>
+                    <button id="mldl-clear-btn" style="margin-top:2px; width:100%; background:#dc3545; color:white; border:none; padding:4px; cursor:pointer; font-weight:bold; border-radius:3px; font-size:9px;">🗑️ Clear Logs</button>
                 </div>
             </div>
         `;
@@ -208,7 +206,7 @@
             GM_setValue('ml_gemini_keys', keyInput);
             GM_setValue('ml_gemini_index', 0);
             GM_setValue('ml_working_model', ''); 
-            sysLog("✅ API Key Saved! System is ready.");
+            sysLog("✅ API Key Saved!");
         });
 
         setInterval(() => {
@@ -274,7 +272,7 @@
                 if (ADMIN_API_KEY && ADMIN_API_KEY.trim() !== '') {
                     keysRaw = ADMIN_API_KEY;
                 } else {
-                    sysLog("⚠️ No API Key found in dashboard! Skipping AI.");
+                    sysLog("⚠️ No API Key! Skipping AI.");
                     return null; 
                 }
             }
@@ -290,7 +288,7 @@
                 let cachedModel = await GM_getValue('ml_working_model_' + key, '');
 
                 if (!cachedModel) {
-                    sysLog(`🔍 Scanning Google Servers for available models...`);
+                    sysLog(`🔍 Scanning Servers...`);
                     try {
                         let scanRes = await new Promise((resolve, reject) => {
                             GM_xmlhttpRequest({
@@ -308,20 +306,20 @@
                             if (validModels.length > 0) {
                                 let chosen = validModels.find(m => m.name.includes('flash')) || validModels[0];
                                 cachedModel = chosen.name.replace('models/', '');
-                                sysLog(`🎯 Radar Found Valid Model: '${cachedModel}'`);
+                                sysLog(`🎯 Model: '${cachedModel}'`);
                                 await GM_setValue('ml_working_model_' + key, cachedModel);
                             } else {
-                                sysLog(`❌ Key has no active AI models!`);
+                                sysLog(`❌ Key has no AI models!`);
                                 currentIndex = (currentIndex + 1) % keys.length;
                                 continue;
                             }
                         } else {
-                            sysLog(`❌ Server Scan Failed. Status: ${scanRes.status}. Your API key might be invalid.`);
+                            sysLog(`❌ Scan Failed (401).`);
                             currentIndex = (currentIndex + 1) % keys.length;
                             continue;
                         }
                     } catch (e) {
-                        sysLog(`❌ Network Error during Server Scan.`);
+                        sysLog(`❌ Network Error.`);
                         currentIndex = (currentIndex + 1) % keys.length;
                         continue;
                     }
@@ -347,16 +345,16 @@
                             await GM_setValue('ml_gemini_index', (currentIndex + 1) % keys.length);
                         }
                         
-                        sysLog(`✅ AI SUCCESS! Decoded by ${cachedModel}`);
+                        sysLog(`✅ AI SUCCESS!`);
                         return parseInt(answer);
                     } else if (res.status === 404) {
-                        sysLog(`🔄 Model '${cachedModel}' is suddenly missing. Clearing cache to rescan...`);
+                        sysLog(`🔄 Model missing. Rescanning...`);
                         await GM_setValue('ml_working_model_' + key, ''); 
                     } else {
-                        sysLog(`❌ AI Task Failed. Status: ${res.status}. Reason: ${res.responseText.substring(0, 80).replace(/\n/g, ' ')}...`);
+                        sysLog(`❌ AI Failed (${res.status}).`);
                     }
                 } catch (e) {
-                    sysLog(`❌ API Network Error.`);
+                    sysLog(`❌ API Error.`);
                 }
                 currentIndex = (currentIndex + 1) % keys.length;
             }
@@ -378,11 +376,10 @@
             if (!(await requireFreshAuth())) return;
 
             let rawText = document.body.innerText.replace(/\n\s*\n/g, '\n').trim();
-            let displayQuestion = rawText.substring(0, 120).replace(/\n/g, ' ') + "...";
-            sysLog(`❓ QUESTION FOUND:\n"${displayQuestion}"`);
+            let displayQuestion = rawText.substring(0, 70).replace(/\n/g, ' ') + "...";
+            sysLog(`❓ Q: "${displayQuestion}"`);
 
             let optionTexts = options.map(o => (o.innerText || o.value || o.textContent || "").trim());
-            sysLog(`📋 OPTIONS:\n` + optionTexts.map((o, i) => `${i + 1}. ${o}`).join(', '));
 
             let aiDecision = await askGemini(rawText.substring(0, 1000), optionTexts);
             
@@ -390,7 +387,7 @@
 
             if (aiDecision !== null && !isNaN(aiDecision) && aiDecision >= 0 && aiDecision < options.length) {
                 selectedIndex = aiDecision;
-                sysLog(`🤖 AI DECIDED: Option ${selectedIndex + 1} -> "${optionTexts[selectedIndex].substring(0, 30).replace(/\n/g, ' ')}"`);
+                sysLog(`🤖 AI: Opt ${selectedIndex + 1}`);
             } else {
                 let rand = Math.random() * 100;
                 if (options.length >= 3) {
@@ -401,7 +398,7 @@
                     if (rand < 95) selectedIndex = 0;
                     else selectedIndex = 1;
                 }
-                sysLog(`🎲 FALLBACK (Random ${rand.toFixed(1)}%): Option ${selectedIndex + 1} -> "${optionTexts[selectedIndex].substring(0, 30).replace(/\n/g, ' ')}"`);
+                sysLog(`🎲 RND (${rand.toFixed(1)}%): Opt ${selectedIndex + 1}`);
             }
 
             const targetOption = options[selectedIndex];
@@ -437,7 +434,7 @@
                     }
 
                     actualSubmitBtn.click();
-                    sysLog(`🚀 HIT SUBMITTED Successfully!`);
+                    sysLog(`🚀 HIT SUBMITTED!`);
 
                     setTimeout(() => window.top.postMessage("mldl_close", "*"), 3000);
                 }
