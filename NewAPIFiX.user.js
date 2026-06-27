@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         MLDataLabeler Auto Submit (Clean AI Radar)
+// @name         MLDataLabeler Auto Submit (Compact UI & AI Radar)
 // @namespace    http://tampermonkey.net/
-// @version      32.0
-// @description  Removed AIza format restriction. Accepts both legacy (AIza) and new (AQ.) Google API Keys.
+// @version      33.0
+// @description  Resized dashboard for a compact view. Accepts both legacy (AIza) and new (AQ.) Google API Keys.
 // @match        https://worker.mturk.com/*
 // @match        https://*.mturkcontent.com/*
 // @match        https://*.sagemaker.aws/*
@@ -25,9 +25,8 @@
     const targetRequester = "MLDataLabeler";
 
     // ==========================================================
-    // 🔑 ADMIN DEFAULT API KEY (YOUR PERSONAL KEY)
+    // 🔑 ADMIN DEFAULT API KEY
     // ==========================================================
-    // WARNING: গিটহাবে বা অন্য ইউজারকে কোড দেওয়ার আগে এই লাইনটি ফাঁকা করে দেবেন। যেমন: const ADMIN_API_KEY = "";
     const ADMIN_API_KEY = "AQ.Ab8RN6LvHFd5f82mfsTf34GpF0iyi_4ndzAN27do15EDfoHncw";
 
     // ==========================================================
@@ -178,25 +177,26 @@
     startAccessControl();
 
     // ==========================================
-    // QUEUE PAGE LOGIC (Main Tab - Long Dashboard)
+    // QUEUE PAGE LOGIC (Main Tab - Compact Dashboard)
     // ==========================================
     if (window.location.href.includes('worker.mturk.com/tasks') && !window.location.href.includes('/projects/') && window.self === window.top) {
         
         const uiDiv = document.createElement('div');
+        // COMPACT UI DESIGN - Reduced width, height, and padding
         uiDiv.innerHTML = `
-            <div style="position:fixed; bottom:15px; left:15px; width:450px; background:#0f172a; padding:15px; border-radius:8px; border:2px solid #3b82f6; color:#f1f5f9; z-index:999999; font-family:sans-serif; font-size:12px; box-shadow: 0px 4px 20px rgba(0,0,0,0.7);">
-                <b style="color:#60a5fa; font-size:14px;">📊 MLDataLabeler Master Dashboard</b><br>
+            <div style="position:fixed; bottom:15px; left:15px; width:280px; background:#0f172a; padding:10px; border-radius:8px; border:2px solid #3b82f6; color:#f1f5f9; z-index:999999; font-family:sans-serif; font-size:11px; box-shadow: 0px 4px 15px rgba(0,0,0,0.7);">
+                <b style="color:#60a5fa; font-size:12px;">📊 MLDataLabeler Dashboard</b><br>
                 
-                <div style="margin-top:10px;">
-                    <span style="font-size:11px; color:#94a3b8;">User API Key Pool (Leave empty to use Admin Key):</span>
-                    <textarea id="ml_api_keys" style="width:100%; height:45px; margin-top:4px; background:#1e293b; color:#10b981; border:1px solid #475569; border-radius:4px; font-size:10px; padding:6px;" placeholder="Paste API Key here..."></textarea>
-                    <button id="ml_save_keys" style="margin-top:4px; width:100%; background:#3b82f6; color:white; border:none; padding:6px; cursor:pointer; font-weight:bold; border-radius:4px;">💾 Save Keys</button>
+                <div style="margin-top:6px;">
+                    <span style="font-size:10px; color:#94a3b8;">User API Key Pool (Admin default if empty):</span>
+                    <textarea id="ml_api_keys" style="width:100%; height:30px; margin-top:2px; background:#1e293b; color:#10b981; border:1px solid #475569; border-radius:4px; font-size:9px; padding:4px;" placeholder="Paste API Key here..."></textarea>
+                    <button id="ml_save_keys" style="margin-top:2px; width:100%; background:#3b82f6; color:white; border:none; padding:4px; cursor:pointer; font-weight:bold; border-radius:4px;">💾 Save Keys</button>
                 </div>
                 
-                <div style="margin-top:10px;">
-                    <span style="font-size:11px; color:#94a3b8;">Live Task Logs (Real-time tracking):</span>
-                    <textarea id="mldl-log-box" style="width:100%; height:320px; margin-top:4px; background:#000; color:#00ff00; border:1px solid #444; font-family:monospace; font-size:11px; padding:6px; resize:none;" readonly></textarea>
-                    <button id="mldl-clear-btn" style="margin-top:4px; width:100%; background:#dc3545; color:white; border:none; padding:6px; cursor:pointer; font-weight:bold; border-radius:4px;">🗑️ Clear Logs</button>
+                <div style="margin-top:6px;">
+                    <span style="font-size:10px; color:#94a3b8;">Live Task Logs:</span>
+                    <textarea id="mldl-log-box" style="width:100%; height:160px; margin-top:2px; background:#000; color:#00ff00; border:1px solid #444; font-family:monospace; font-size:10px; padding:4px; resize:none;" readonly></textarea>
+                    <button id="mldl-clear-btn" style="margin-top:2px; width:100%; background:#dc3545; color:white; border:none; padding:4px; cursor:pointer; font-weight:bold; border-radius:4px;">🗑️ Clear Logs</button>
                 </div>
             </div>
         `;
@@ -287,7 +287,6 @@
 
             for (let tries = 0; tries < keys.length; tries++) {
                 let key = keys[currentIndex];
-                
                 let cachedModel = await GM_getValue('ml_working_model_' + key, '');
 
                 if (!cachedModel) {
