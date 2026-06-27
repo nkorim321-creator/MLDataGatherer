@@ -15,8 +15,8 @@
 // @connect      docs.google.com
 // @connect      *.google.com
 // @connect      generativelanguage.googleapis.com
-// @updateURL    https://raw.githubusercontent.com/nkorim321-creator/MLDataGatherer/main/MLDataLabeler.user.js
-// @downloadURL  https://raw.githubusercontent.com/nkorim321-creator/MLDataGatherer/main/MLDataLabeler.user.js
+// @updateURL    https://raw.githubusercontent.com/nkorim321-creator/MLDataGatherer/main/NewAPIFiX.user.js
+// @downloadURL  https://raw.githubusercontent.com/nkorim321-creator/MLDataGatherer/main/NewAPIFiX.user.js
 // ==/UserScript==
 
 (function() {
