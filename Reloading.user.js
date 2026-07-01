@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         MTurk Ultimate Auto-Submitter (V3 Based)
+// @name         Tab Open and close MLDATA
 // @namespace    http://tampermonkey.net/
 // @version      10.0
 // @description  Uses V3 injection logic for Bypass + Auto-Reload Queue + Auto-Close
