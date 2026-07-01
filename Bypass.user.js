@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         MTurk Auto Bypass - Final Auto Fix
+// @name         MTurk Auto Bypass - Final Auto Fix (Perfect Ratio)
 // @namespace    http://tampermonkey.net/
-// @version      3.0
-// @description  Bypass blocker automatically without manual console paste
+// @version      3.2
+// @description  Bypass blocker automatically with perfectly balanced random option selection
 // @match        *://*/*
 // @include      *
 // @allFrames    true
@@ -54,13 +54,31 @@
                     console.log("Successfully injected automatically!");
                 }
 
-                // ৪. অটো সিলেক্ট এবং সাবমিট
+                // ৪. ব্যালেন্সড র্যান্ডম অপশন সিলেক্ট এবং সাবমিট
                 setTimeout(() => {
-                    let firstOption = document.querySelector('crowd-radio-button[name="category"]');
+                    let allOptions = document.querySelectorAll('crowd-radio-button[name="category"]');
                     let submitBtn = document.querySelector('crowd-button[form-action="submit"]');
 
-                    if (firstOption && submitBtn) {
-                        firstOption.click(); // রেডিও বাটনে ক্লিক
+                    if (allOptions.length > 0 && submitBtn) {
+
+                        // ব্রাউজারের মেমোরি থেকে সিকোয়েন্স বের করা
+                        let queue = JSON.parse(localStorage.getItem('mturk_option_queue') || '[]');
+
+                        // যদি মেমোরি খালি থাকে, তাহলে সবগুলো অপশনের একটি নতুন লিস্ট তৈরি করে উলটপালট (Shuffle) করা
+                        if (queue.length === 0) {
+                            for (let i = 0; i < allOptions.length; i++) queue.push(i);
+                            for (let i = queue.length - 1; i > 0; i--) {
+                                let j = Math.floor(Math.random() * (i + 1));
+                                [queue[i], queue[j]] = [queue[j], queue[i]];
+                            }
+                        }
+
+                        // লিস্ট থেকে একটি অপশন নেওয়া এবং মেমোরি আপডেট করা
+                        let randomIndex = queue.pop();
+                        localStorage.setItem('mturk_option_queue', JSON.stringify(queue));
+
+                        allOptions[randomIndex].click(); // ব্যালেন্সড র্যান্ডম রেডিও বাটনে ক্লিক
+
                         setTimeout(() => {
                             submitBtn.click(); // সাবমিট বাটনে ক্লিক
                         }, 500);
@@ -73,11 +91,11 @@
         }, 200);
     }
 
-    // ম্যাজিক ট্রিক: documentElement ব্যবহার করে পেজ পুরোপুরি লোড হওয়ার আগেই কোড ইনজেক্ট করা হলো
+    // ম্যাজিক ট্রিক: documentElement ব্যবহার করে পেজ পুরোপুরি লোড হওয়ার আগেই কোড ইনজেক্ট করা হলো
     let script = document.createElement('script');
     script.textContent = '(' + bypassLogic.toString() + ')();';
 
-    // বডির জন্য অপেক্ষা না করে সরাসরি HTML-এর গোড়ায় বসানো হলো
+    // বডির জন্য অপেক্ষা না করে সরাসরি HTML-এর গোড়ায় বসানো হলো
     if (document.documentElement) {
         document.documentElement.appendChild(script);
         script.remove();
