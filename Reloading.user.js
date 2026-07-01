@@ -19,7 +19,7 @@
             let taskLinks = document.querySelectorAll('a[href*="/projects/"][href*="/tasks/"]');
             taskLinks.forEach(link => {
                 let row = link.closest('.table-row') || link.closest('li') || link.parentElement.parentElement;
-                if (row && row.textContent.includes('MLDataGatherer') && row.textContent.includes('Pick a product category')) {
+                if (row && row.textContent.includes('MLDataGatherer') && row.textContent.includes('Select the product category')) {
                     let url = link.href;
                     // চেক করা হচ্ছে আগে ওপেন হয়েছে কি না
                     let openedHits = JSON.parse(localStorage.getItem('openedHITs_ML') || '[]');
