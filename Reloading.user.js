@@ -24,8 +24,7 @@
             let taskLinks = document.querySelectorAll('a[href*="/projects/"][href*="/tasks/"]');
             taskLinks.forEach(link => {
                 let row = link.closest('.table-row') || link.closest('li') || link.parentElement.parentElement;
-                if (row && row.textContent.includes('MLDataGatherer') && row.textContent.includes('
-Label the product category')) {
+                if (row && row.textContent.includes('MLDataGatherer') && row.textContent.includes('Label the product category')) {
                     let url = link.href;
                     let openedHits = JSON.parse(localStorage.getItem('openedHITs_ML') || '[]');
                     if (!openedHits.includes(url)) {
