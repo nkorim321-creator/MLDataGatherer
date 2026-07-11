@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         MLDataGatherer Auto Submit (Multi-Target)
+// @name         MLD Ultimate Auto Submit (Multi-Target & Smart Polling)
 // @namespace    http://violentmonkey.net/
-// @version      1.30
-// @description  Auto-open & submit multiple MTurk Requester HITs. Integrated page-context native click logic for flawless submission.
+// @version      1.51
+// @description  Flawlessly auto-selects and submits all MLD tasks (MLDataLabeler, MLDataGatherer, etc.) even with slow loading UIs.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
 // @match        https://www.mturk.com/*
@@ -22,8 +22,7 @@
     // ============================================================
     var DRY_RUN = false;
 
-    // এখানে আপনি যত খুশি Requester এবং Title এর জোড়া (Pair) যোগ করতে পারবেন।
-    // নিচের ফরম্যাট অনুযায়ী কমা (,) দিয়ে দিয়ে নতুন লাইন যোগ করুন।
+    // নিচে আপনার আগের কাজগুলো এবং নতুন কাজ যোগ করার জন্য মোট ২০টি স্লট দেওয়া হলো:
     var TARGETS = [
         { requester: 'MLDataGatherer', title: 'Smart Capture Invoice Review' },
         { requester: 'MLDataGatherer', title: 'the taskTitle' },
@@ -31,16 +30,26 @@
         { requester: 'MLDataLabeler', title: 'Classify the following image' },
         { requester: 'MLDataLabeling', title: 'Categorize the image into one or more classes' },
         { requester: 'MLDataLabeling', title: 'Classify the following video' },
-        { requester: 'Requester Name 7', title: 'Task Title 7' },
-        { requester: 'Requester Name 8', title: 'Task Title 8' },
+        { requester: 'MLDataLabeling', title: 'Classify short bits of text' },
+        { requester: 'MLDataLabeling', title: 'Classify the following image' },
+        // --- এখান থেকে নতুন কাজগুলো এডিট করে বসাতে পারবেন ---
         { requester: 'Requester Name 9', title: 'Task Title 9' },
-        { requester: 'Requester Name 10', title: 'Task Title 10' }
+        { requester: 'Requester Name 10', title: 'Task Title 10' },
+        { requester: 'Requester Name 11', title: 'Task Title 11' },
+        { requester: 'Requester Name 12', title: 'Task Title 12' },
+        { requester: 'Requester Name 13', title: 'Task Title 13' },
+        { requester: 'Requester Name 14', title: 'Task Title 14' },
+        { requester: 'Requester Name 15', title: 'Task Title 15' },
+        { requester: 'Requester Name 16', title: 'Task Title 16' },
+        { requester: 'Requester Name 17', title: 'Task Title 17' },
+        { requester: 'Requester Name 18', title: 'Task Title 18' },
+        { requester: 'Requester Name 19', title: 'Task Title 19' },
+        { requester: 'Requester Name 20', title: 'Task Title 20' }
     ];
 
     var QUEUE_URL           = 'https://worker.mturk.com/tasks';
-    var QUEUE_AUTO_RELOAD   = false;
     var RELOAD_INTERVAL_MS  = 60 * 1000;
-    var SUBMIT_DELAY_MS     = 3500;                               // Wait time before clicking Submit
+    var SUBMIT_DELAY_MS     = 1200;                               // HasanBhai's Golden Rule
     var POST_SUBMIT_WAIT_MS = 8000;
     var WHITE_PAGE_WAIT_MS  = 10000;
     var WORK_CLICK_DELAY_MS = 1500;
@@ -61,43 +70,6 @@
     function log(msg){
         var line = '[' + tsNow() + '] ' + msg;
         try { console.log(TAG + ' ' + line); } catch(e){}
-        try {
-            var prefix = (window.top !== window)
-                ? ('(' + (location.hostname || 'iframe') + ') ')
-                : '';
-            var buf = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
-            buf.push(prefix + line);
-            if (buf.length > LOG_MAX) buf = buf.slice(-LOG_MAX);
-            localStorage.setItem(LOG_KEY, JSON.stringify(buf));
-        } catch(e){}
-        if (window.top !== window) {
-            try { window.parent.postMessage({ type: 'MLDG_LOG', line: line, origin: location.hostname }, '*'); }
-            catch(e){}
-        }
-    }
-
-    if (typeof window !== 'undefined' && window.top === window) {
-        try {
-            window.addEventListener('message', function (ev) {
-                if (!ev.data) return;
-                var fromSagemaker = false;
-                try { fromSagemaker = /\.sagemaker\.aws$/i.test(new URL(ev.origin).hostname); } catch (e) {}
-
-                if (fromSagemaker && typeof noteIframeResponse === 'function') {
-                    try { noteIframeResponse(ev.origin); } catch (e) {}
-                }
-
-                if (ev.data.type === 'MLDG_LOG' && typeof ev.data.line === 'string') {
-                    try {
-                        var buf = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
-                        buf.push('(' + (ev.data.origin || ev.origin) + ') ' + ev.data.line);
-                        if (buf.length > LOG_MAX) buf = buf.slice(-LOG_MAX);
-                        localStorage.setItem(LOG_KEY, JSON.stringify(buf));
-                    } catch (e) {}
-                    return;
-                }
-            });
-        } catch (e) {}
     }
 
     function txt(el){ return (el && (el.innerText || el.textContent) || '').replace(/\s+/g,' ').trim(); }
@@ -107,31 +79,18 @@
             try { location.reload(); } catch(e){}
             return;
         }
-        try { location.href = QUEUE_URL; }
-        catch(e){ try { location.replace(QUEUE_URL); } catch(e2){} }
+        try { location.href = QUEUE_URL; } catch(e){ try { location.replace(QUEUE_URL); } catch(e2){} }
     }
 
-    function isOnTaskPage(){
-        return /^\/projects\/[^\/]+\/tasks\/[^\/]+\/?$/.test(location.pathname);
-    }
+    function isOnTaskPage(){ return /^\/projects\/[^\/]+\/tasks\/[^\/]+\/?$/.test(location.pathname); }
 
     function safeReload(reason){
-        if (DRY_RUN){
-            log('safeReload SKIPPED (DRY_RUN) reason=' + (reason || '?'));
-            return false;
-        }
-        if (isOnTaskPage()){
-            log('safeReload BLOCKED (on task page) reason=' + (reason || '?'));
-            return false;
-        }
+        if (DRY_RUN || isOnTaskPage()) return false;
         log('safeReload reason=' + (reason || '?'));
         goToQueue();
         return true;
     }
 
-    // ============================================================
-    //  SERVER-BUSY DISMISSER
-    // ============================================================
     function handleServerBusy() {
         if (!document.body) return false;
         var title = (document.title || '').toLowerCase();
@@ -149,26 +108,18 @@
         return false;
     }
 
-    // ============================================================
-    //  WHITE / BLANK PAGE GUARD
-    // ============================================================
     function isWhitePage() {
         if (!document.body) return true;
         var html = (document.body.innerHTML || '').length;
         var text = ((document.body.innerText || '').trim()).length;
         if (html < 500 || text < 80) return true;
-        if (!document.querySelector('a[href*="mturk"],img[alt*="mturk" i],[class*="mturk" i]')) {
-            return true;
-        }
+        if (!document.querySelector('a[href*="mturk"],img[alt*="mturk" i],[class*="mturk" i]')) return true;
         return false;
     }
 
     function whitePageGuard() {
         setTimeout(function () {
-            if (isWhitePage()) {
-                log('White/blank page detected — forcing full reload');
-                safeReload('white-page');
-            }
+            if (isWhitePage()) safeReload('white-page');
         }, WHITE_PAGE_WAIT_MS);
     }
 
@@ -178,21 +129,15 @@
     function rowMatchesTarget(rowEl) {
         var t = txt(rowEl);
         if (!t) return false;
-
-        // চেক করবে লিস্টের যেকোনো একটি Requester এবং Title মিলছে কি না
         return TARGETS.some(function(target) {
             return t.indexOf(target.requester) !== -1 && t.indexOf(target.title) !== -1;
         });
     }
 
     function findAndClickWork() {
-        var rows = document.querySelectorAll(
-            'tr, [class*="task-queue" i] [class*="row" i], [data-react-class] tr, .panel, .row, [class*="task-row" i]'
-        );
-
+        var rows = document.querySelectorAll('tr, [class*="task-queue" i] [class*="row" i], [data-react-class] tr, .panel, .row, [class*="task-row" i]');
         for (var i = 0; i < rows.length; i++) {
             if (!rowMatchesTarget(rows[i])) continue;
-
             var candidates = rows[i].querySelectorAll('a, button, input[type="submit"]');
             for (var j = 0; j < candidates.length; j++) {
                 var el = candidates[j];
@@ -200,11 +145,7 @@
                 var href  = (el.getAttribute && el.getAttribute('href')) || '';
                 var isWork = /^\s*work\s*$/i.test(label) || /\/projects\/.+\/tasks\//.test(href);
                 if (isWork) {
-                    if (DRY_RUN) {
-                        log('Target HIT found — WOULD click Work (DRY_RUN) href=' + href + ' label="' + label + '"');
-                        return true;
-                    }
-                    log('Target HIT found — clicking Work');
+                    if (DRY_RUN) return true;
                     try {
                         if (href && href.indexOf('/projects/') > -1) {
                             location.href = href.indexOf('http') === 0 ? href : ('https://worker.mturk.com' + href);
@@ -212,44 +153,18 @@
                         }
                         el.click();
                         return true;
-                    } catch (e) {
-                        log('Work click failed: ' + e.message);
-                    }
+                    } catch (e) { log('Work click failed: ' + e.message); }
                 }
             }
         }
         return false;
     }
 
-    // ============================================================
-    //  TASK PAGE MATCH LOGIC
-    // ============================================================
     function pageIsTargetTask() {
         var body = document.body ? (document.body.innerText || '') : '';
-
-        // টাস্ক পেজে চেক করবে লিস্টের কোনো Requester ও Title আছে কি না
         return TARGETS.some(function(target) {
             return body.indexOf(target.requester) !== -1 && body.indexOf(target.title) !== -1;
         });
-    }
-
-    function describeEl(el){
-        if (!el) return '(null)';
-        var s = (el.tagName || '').toLowerCase();
-        if (el.id) s += '#' + el.id;
-        var tx = (el.textContent || el.value || '').replace(/\s+/g,' ').trim().slice(0, 30);
-        if (tx) s += ' txt="' + tx + '"';
-        return s;
-    }
-
-    var lastReloadAt = now();
-    function startQueueAutoReload() {
-        setInterval(function () {
-            if (now() - lastReloadAt < RELOAD_INTERVAL_MS - 500) return;
-            if (isOnTaskPage()) return;
-            lastReloadAt = now();
-            safeReload('queue-tick');
-        }, RELOAD_INTERVAL_MS);
     }
 
     function showBadge(text) {
@@ -257,162 +172,165 @@
         var b = document.getElementById('mldg-badge');
         if (!b) {
             b = document.createElement('div'); b.id = 'mldg-badge';
-            b.style.cssText = 'position:fixed;bottom:8px;right:8px;z-index:2147483646;background:#222;color:#7CFC00;font:600 11px system-ui;padding:4px 8px;border-radius:4px;opacity:.9;cursor:pointer;user-select:none';
-            b.title = 'Click to view logs';
-            b.onclick = function () { toggleLogViewer(); };
+            b.style.cssText = 'position:fixed;bottom:8px;right:8px;z-index:2147483646;background:#222;color:#7CFC00;font:600 11px system-ui;padding:4px 8px;border-radius:4px;opacity:.9;pointer-events:none;';
             if (document.body) document.body.appendChild(b);
         }
-        b.textContent = 'MLDG ' + text + ' · 📋';
+        b.textContent = 'MLD ' + text;
     }
 
-    function toggleLogViewer() {
-        var v = document.getElementById('mldg-log-viewer');
-        if (v) { v.remove(); return; }
-        v = document.createElement('div'); v.id = 'mldg-log-viewer';
-        v.style.cssText = 'position:fixed;right:8px;bottom:40px;width:560px;max-height:60vh;z-index:2147483647;background:#111;color:#eee;font:11px ui-monospace,monospace;border:1px solid #444;border-radius:6px;display:flex;flex-direction:column;box-shadow:0 4px 20px rgba(0,0,0,.5)';
-        var hdr = document.createElement('div');
-        hdr.style.cssText = 'padding:6px 10px;background:#222;color:#7CFC00;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #444';
-        hdr.innerHTML = '<span style="font-weight:600">MLDG logs (persistent)</span>';
-        var btns = document.createElement('div');
-        function mkBtn(label, fn){
-            var x = document.createElement('button');
-            x.textContent = label;
-            x.style.cssText = 'margin-left:6px;padding:2px 8px;background:#333;color:#eee;border:1px solid #555;border-radius:3px;font:600 10px system-ui;cursor:pointer';
-            x.onclick = fn; return x;
-        }
-        var body = document.createElement('pre');
-        body.style.cssText = 'margin:0;padding:8px 10px;overflow:auto;white-space:pre-wrap;flex:1;color:#ddd;font:11px ui-monospace,monospace';
-        function refresh(){
-            try {
-                var buf = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
-                body.textContent = buf.join('\n') || '(no logs yet)';
-                body.scrollTop = body.scrollHeight;
-            } catch(e){ body.textContent = 'log read err: ' + e.message; }
-        }
-        btns.appendChild(mkBtn('Copy', function(){
-            try { navigator.clipboard.writeText(body.textContent); } catch(e){}
-        }));
-        btns.appendChild(mkBtn('Refresh', refresh));
-        btns.appendChild(mkBtn('Clear', function(){
-            try { localStorage.removeItem(LOG_KEY); } catch(e){}
-            refresh();
-        }));
-        btns.appendChild(mkBtn('Close', function(){ v.remove(); }));
-        hdr.appendChild(btns);
-        v.appendChild(hdr); v.appendChild(body);
-        document.body.appendChild(v);
-        refresh();
-        var iv = setInterval(function(){
-            if (!document.body.contains(v)){ clearInterval(iv); return; }
-            refresh();
-        }, 1500);
-    }
-
-    function isQueuePage() {
-        var p = location.pathname || '';
-        return /^\/tasks\/?$/.test(p);
-    }
-    function isTaskPage() {
-        var p = location.pathname || '';
-        return /^\/projects\/[^\/]+\/tasks\/[^\/]+\/?$/.test(p);
-    }
-    function isPostSubmitPage() {
-        var p = location.pathname || '';
-        return /^\/projects\/[^\/]+\/tasks\/[^\/]+\/submit\/?$/.test(p);
-    }
-    function isSagemakerIframe() {
-        if (window.top === window) return false;
-        return /\.sagemaker\.aws$/i.test(location.hostname);
-    }
+    function isQueuePage() { return /^\/tasks\/?$/.test(location.pathname || ''); }
+    function isTaskPage() { return /^\/projects\/[^\/]+\/tasks\/[^\/]+\/?$/.test(location.pathname || ''); }
+    function isPostSubmitPage() { return /^\/projects\/[^\/]+\/tasks\/[^\/]+\/submit\/?$/.test(location.pathname || ''); }
+    function isSagemakerIframe() { return window.top !== window && /\.sagemaker\.aws$/i.test(location.hostname); }
 
     var MSG_TYPE_AUTH = 'MLDG_AUTH';
     var TRUSTED_PARENT_ORIGIN = 'https://worker.mturk.com';
-    var _iframeEverResponded = false;
-
-    function noteIframeResponse(origin) {
-        if (_iframeEverResponded) return;
-        _iframeEverResponded = true;
-        log('parent: iframe-side script is alive (heard from ' + origin + ')');
-    }
+    var _sagemakerAuthOk = false;
 
     function startParentAuthSignal() {
-        if (!pageIsTargetTask()) {
-            return;
-        }
-        log('parent: signalling auth to iframes every 1s');
+        if (!pageIsTargetTask()) return;
         function blast() {
             var iframes = document.querySelectorAll('iframe');
             for (var i = 0; i < iframes.length; i++) {
-                try { iframes[i].contentWindow.postMessage({ type: MSG_TYPE_AUTH, ts: now() }, '*'); }
-                catch (e) {}
+                try { iframes[i].contentWindow.postMessage({ type: MSG_TYPE_AUTH, ts: now() }, '*'); } catch (e) {}
             }
         }
         blast();
         setInterval(blast, 1000);
-
-        setTimeout(function () {
-            if (_iframeEverResponded) return;
-            if (!isOnTaskPage()) return;
-            var sageIframe = null;
-            try {
-                var all = document.querySelectorAll('iframe');
-                for (var i = 0; i < all.length; i++) {
-                    if (all[i].src && /\.sagemaker\.aws/.test(all[i].src)) { sageIframe = all[i]; break; }
-                }
-            } catch (e) {}
-            try { showBadge('v' + V + ' task · ⚠ NO IFRAME — fix loader @match'); } catch (e) {}
-        }, 10000);
     }
 
-    var _sagemakerAuthOk = false;
-    var _iframeAttempts = 0;
     function setupSagemakerListener() {
         window.addEventListener('message', function (ev) {
             if (ev.origin !== TRUSTED_PARENT_ORIGIN) return;
             if (!ev.data || ev.data.type !== MSG_TYPE_AUTH) return;
-            if (!_sagemakerAuthOk) {
-                _sagemakerAuthOk = true;
-                log('sagemaker: AUTH received from ' + ev.origin);
-            }
+            _sagemakerAuthOk = true;
         });
     }
 
+    // ============================================================
+    // SHADOW DOM & SMART SELECTORS FOR SAGE-MAKER IFRAME
+    // ============================================================
+    function getElementsDeep(selector, root = document) {
+        let results = Array.from(root.querySelectorAll(selector));
+        const allElements = root.querySelectorAll('*');
+        for (let el of allElements) {
+            if (el.shadowRoot) results = results.concat(getElementsDeep(selector, el.shadowRoot));
+        }
+        return results;
+    }
+
+    function isVisible(el) { return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length); }
+
+    function getTaskOptions() {
+        let els = getElementsDeep('crowd-radio-button, input[type="radio"], .category-button, paper-radio-button').filter(isVisible);
+        if (els.length >= 2) return els;
+
+        let allBtns = getElementsDeep('button, crowd-button, paper-button').filter(isVisible);
+        let options = allBtns.filter(b => {
+            let txt = (b.innerText || b.textContent || b.value || '').trim().toLowerCase();
+            return txt && !['submit', 'submit hit', 'cancel', 'close', 'instructions'].includes(txt);
+        });
+
+        if (options.length >= 2) return options;
+        return [];
+    }
+
+    // ============================================================
+    // UPDATED CONTINUOUS POLLING LOOP
+    // ============================================================
+    var _actionTriggered = false;
+    var _pollAttempts = 0;
+
     function sagemakerSubmitLoop() {
+        if (_actionTriggered) return;
+
         if (!_sagemakerAuthOk) {
-            _iframeAttempts++;
             setTimeout(sagemakerSubmitLoop, 1000);
             return;
         }
 
-        var btn = document.querySelector('crowd-button[data-testid="crowd-submit"]') ||
-                  document.querySelector('crowd-button[form-action="submit"]') ||
-                  document.querySelector('[data-testid="crowd-submit"]');
+        let options = getTaskOptions();
 
-        if (!btn) {
-            _iframeAttempts++;
-            setTimeout(sagemakerSubmitLoop, 1500);
+        if (options.length >= 2) {
+            _actionTriggered = true;
+            log(`sagemaker: Found ${options.length} options! Applying selection logic...`);
+
+            let selectedIndex = 0;
+            let rand = Math.random() * 100;
+            if (options.length >= 3) {
+                if (rand < 95) selectedIndex = 0;
+                else if (rand < 98) selectedIndex = 1;
+                else selectedIndex = 2;
+            } else if (options.length === 2) {
+                if (rand < 95) selectedIndex = 0;
+                else selectedIndex = 1;
+            }
+
+            const targetOption = options[selectedIndex];
+
+            targetOption.click();
+            if (targetOption.shadowRoot) {
+                const inner = targetOption.shadowRoot.querySelector('input, button, label');
+                if (inner) inner.click();
+            }
+            if ('checked' in targetOption) targetOption.checked = true;
+
+            setTimeout(doFinalSubmit, SUBMIT_DELAY_MS);
             return;
         }
 
-        // Delay logic
-        if (!btn.dataset.mldgDelayed) {
-            btn.dataset.mldgDelayed = "true";
-            log('sagemaker: waiting ' + SUBMIT_DELAY_MS + 'ms before clicking submit...');
-            setTimeout(sagemakerSubmitLoop, SUBMIT_DELAY_MS);
-            return;
+        _pollAttempts++;
+        if (_pollAttempts > 15) {
+            let submitExists = getElementsDeep('crowd-submit, button[type="submit"], [data-testid="crowd-submit"]').filter(isVisible).length > 0;
+            if (submitExists) {
+                _actionTriggered = true;
+                log('sagemaker: No options found after 15s. Forcing submit anyway...');
+                setTimeout(doFinalSubmit, 500);
+                return;
+            }
         }
 
-        log('sagemaker: injecting pure native click into page context (Bypass style)');
+        setTimeout(sagemakerSubmitLoop, 500);
+    }
 
-        // --- PAGE CONTEXT INJECTION ---
+    // ============================================================
+    // THE FINAL SUBMIT UNLOCKER (Native Context)
+    // ============================================================
+    function doFinalSubmit() {
+        log('sagemaker: injecting pure native click & unlock into page context');
         let script = document.createElement('script');
         script.textContent = `
             (function() {
-                var submitBtn = document.querySelector('crowd-button[data-testid="crowd-submit"]') ||
-                                document.querySelector('crowd-button[form-action="submit"]') ||
-                                document.querySelector('[data-testid="crowd-submit"]');
-                if (submitBtn) {
-                    submitBtn.click();
+                function getDeep(selector, root = document) {
+                    let res = Array.from(root.querySelectorAll(selector));
+                    for (let el of root.querySelectorAll('*')) {
+                        if (el.shadowRoot) res = res.concat(getDeep(selector, el.shadowRoot));
+                    }
+                    return res;
+                }
+
+                let allButtons = getDeep('crowd-submit, button, input[type="submit"], .btn-primary, .awsui-button');
+                let actualSubmitBtn = null;
+
+                for (let btn of allButtons) {
+                    if (btn.tagName.toLowerCase() === 'crowd-submit') { actualSubmitBtn = btn; break; }
+                    const txt = (btn.innerText || btn.textContent || btn.value || "").trim().toLowerCase();
+                    if (txt === "submit" || txt === "submit hit") { actualSubmitBtn = btn; break; }
+                }
+
+                if (actualSubmitBtn) {
+                    actualSubmitBtn.removeAttribute('disabled');
+                    actualSubmitBtn.disabled = false;
+
+                    if (actualSubmitBtn.tagName.toLowerCase() === 'crowd-submit' && actualSubmitBtn.shadowRoot) {
+                        const innerSubmit = actualSubmitBtn.shadowRoot.querySelector('button');
+                        if (innerSubmit) {
+                            innerSubmit.removeAttribute('disabled');
+                            innerSubmit.disabled = false;
+                            innerSubmit.click();
+                        }
+                    }
+                    actualSubmitBtn.click();
                 }
             })();
         `;
@@ -422,35 +340,23 @@
         }
     }
 
-    var V = '1.30' + (DRY_RUN ? ' [DRY-RUN]' : '');
-    try {
-        var lastVer = localStorage.getItem('mldg_last_ver');
-        if (lastVer !== V) {
-            localStorage.removeItem(LOG_KEY);
-            localStorage.setItem('mldg_last_ver', V);
-        }
-    } catch (e) {}
-
     function main() {
         if (isSagemakerIframe()) {
             setupSagemakerListener();
-            setTimeout(sagemakerSubmitLoop, 2500);
+            setTimeout(sagemakerSubmitLoop, 1000);
             return;
         }
 
         handleServerBusy();
 
         if (isPostSubmitPage()) {
-            log('Post-submit 404 page — bouncing to queue in 4000ms');
-            showBadge('v' + V + ' post-submit → queue');
+            showBadge('post-submit → queue');
             setTimeout(goToQueue, 4000);
             return;
         }
 
         if (isQueuePage()) {
-            if (!DRY_RUN) {
-                whitePageGuard();
-            }
+            if (!DRY_RUN) whitePageGuard();
             setTimeout(findAndClickWork, WORK_CLICK_DELAY_MS);
             setInterval(function () { if (isQueuePage()) findAndClickWork(); }, 5000);
             return;
@@ -461,7 +367,7 @@
             return;
         }
 
-        showBadge('v' + V + ' idle');
+        showBadge('idle');
     }
 
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
