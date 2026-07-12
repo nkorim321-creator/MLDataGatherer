@@ -8,6 +8,8 @@
 // @match        https://www.mturk.com/*
 // @match        https://*.public-workforce.*.sagemaker.aws/*
 // @match        https://*.sagemaker.aws/work*
+// @updateURL    https://raw.githubusercontent.com/nkorim321-creator/MLDataGatherer/main/MLDMulti-Target.user.js
+// @downloadURL  https://raw.githubusercontent.com/nkorim321-creator/MLDataGatherer/main/MLDMulti-Target.user.js
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_notification
@@ -35,12 +37,13 @@
         // --- Labeling কাজের লিস্ট ---
         { requester: 'MLDataLabeler', title: 'Classify short bits of text', action: 'labeling' },
         { requester: 'MLDataLabeler', title: 'Classify the following image', action: 'labeling' },
+        { requester: 'MLDataLabeler', title: 'Text Classification (Single Label)', action: 'labeling' },
         { requester: 'MLDataLabeling', title: 'Categorize the image into one or more classes', action: 'labeling' },
         { requester: 'MLDataLabeling', title: 'Classify the following video', action: 'labeling' },
         { requester: 'MLDataLabeling', title: 'Classify short bits of text', action: 'labeling' },
-        { requester: 'MLDataLabeler', title: 'Text Classification (Single Label)', action: 'labeling' },
+        { requester: 'MLDataLabeling', title: 'Classify the following image', action: 'labeling' },
+
         // --- ফাঁকা ২০টি স্লট (ভবিষ্যতের জন্য) ---
-        { requester: 'Requester Name 9', title: 'Task Title 9', action: 'labeling' },
         { requester: 'Requester Name 10', title: 'Task Title 10', action: 'labeling' },
         { requester: 'Requester Name 11', title: 'Task Title 11', action: 'labeling' },
         { requester: 'Requester Name 12', title: 'Task Title 12', action: 'labeling' },
@@ -146,7 +149,7 @@
                 var isWork = /^\s*work\s*$/i.test(label) || /\/projects\/.+\/tasks\//.test(href);
                 if (isWork) {
                     if (DRY_RUN) return true;
-                    if (el.dataset.opened) continue; 
+                    if (el.dataset.opened) continue;
 
                     try {
                         el.dataset.opened = "true";
@@ -202,7 +205,7 @@
     var MSG_TYPE_AUTH = 'MLDG_AUTH';
     var TRUSTED_PARENT_ORIGIN = 'https://worker.mturk.com';
     var _sagemakerAuthOk = false;
-    var _taskAction = 'labeling'; 
+    var _taskAction = 'labeling';
 
     function startParentAuthSignal() {
         var matched = getMatchedTarget();
@@ -383,7 +386,7 @@
                 setTimeout(function() {
                     window.close();
                     setTimeout(function() { window.open('', '_self'); window.close(); }, 150);
-                }, 2000); // কাজ শেষ হওয়ার ২ সেকেন্ড পর কেটে যাবে
+                }, 2000);
                 return;
             }
         }
