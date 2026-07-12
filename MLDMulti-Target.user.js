@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         MLD Ultimate Auto Submit (Multi-Target & Smart Polling)
+// @name         MLD Ultimate Auto Submit (Dual Action Mode - New Tab & Auto Close)
 // @namespace    http://violentmonkey.net/
-// @version      1.51
-// @description  Flawlessly auto-selects and submits all MLD tasks (MLDataLabeler, MLDataGatherer, etc.) even with slow loading UIs.
+// @version      2.2
+// @description  Perfectly handles BOTH 'Invoice' and 'Labeling' tasks. Opens HITs in a new tab and auto-closes them after submission reliably.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
 // @match        https://www.mturk.com/*
@@ -11,57 +11,61 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_notification
+// @grant        GM_openInTab
+// @grant        window.close
 // @run-at       document-idle
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    // ============================================================
-    //  CONFIG — TARGET REQUESTERS & TITLES
-    // ============================================================
     var DRY_RUN = false;
 
-    // নিচে আপনার আগের কাজগুলো এবং নতুন কাজ যোগ করার জন্য মোট ২০টি স্লট দেওয়া হলো:
+    // ============================================================
+    //  🎯 TARGET LIST (কাজের তালিকা ও তার নিয়ম)
+    // ============================================================
+    // action: 'invoice' = অপশন খুঁজবে না, সোজা 3.5s পর সাবমিট করবে। (1.20 এর নিয়ম)
+    // action: 'labeling' = অপশনের জন্য অপেক্ষা করবে, টিক দিয়ে সাবমিট করবে।
+
     var TARGETS = [
-        { requester: 'MLDataGatherer', title: 'Smart Capture Invoice Review' },
-        { requester: 'MLDataGatherer', title: 'the taskTitle' },
-        { requester: 'MLDataLabeler', title: 'Classify short bits of text' },
-        { requester: 'MLDataLabeler', title: 'Classify the following image' },
-        { requester: 'MLDataLabeling', title: 'Categorize the image into one or more classes' },
-        { requester: 'MLDataLabeling', title: 'Classify the following video' },
-        { requester: 'MLDataLabeling', title: 'Classify short bits of text' },
-        { requester: 'MLDataLabeling', title: 'Classify the following image' },
-        // --- এখান থেকে নতুন কাজগুলো এডিট করে বসাতে পারবেন ---
-        { requester: 'Requester Name 9', title: 'Task Title 9' },
-        { requester: 'Requester Name 10', title: 'Task Title 10' },
-        { requester: 'Requester Name 11', title: 'Task Title 11' },
-        { requester: 'Requester Name 12', title: 'Task Title 12' },
-        { requester: 'Requester Name 13', title: 'Task Title 13' },
-        { requester: 'Requester Name 14', title: 'Task Title 14' },
-        { requester: 'Requester Name 15', title: 'Task Title 15' },
-        { requester: 'Requester Name 16', title: 'Task Title 16' },
-        { requester: 'Requester Name 17', title: 'Task Title 17' },
-        { requester: 'Requester Name 18', title: 'Task Title 18' },
-        { requester: 'Requester Name 19', title: 'Task Title 19' },
-        { requester: 'Requester Name 20', title: 'Task Title 20' }
+        // --- Invoice কাজের লিস্ট ---
+        { requester: 'MLDataGatherer', title: 'Smart Capture Invoice Review', action: 'invoice' },
+        { requester: 'MLDataGatherer', title: 'the taskTitle', action: 'invoice' },
+
+        // --- Labeling কাজের লিস্ট ---
+        { requester: 'MLDataLabeler', title: 'Classify short bits of text', action: 'labeling' },
+        { requester: 'MLDataLabeler', title: 'Classify the following image', action: 'labeling' },
+        { requester: 'MLDataLabeling', title: 'Categorize the image into one or more classes', action: 'labeling' },
+        { requester: 'MLDataLabeling', title: 'Classify the following video', action: 'labeling' },
+        { requester: 'MLDataLabeling', title: 'Classify short bits of text', action: 'labeling' },
+        { requester: 'MLDataLabeler', title: 'Text Classification (Single Label)', action: 'labeling' },
+        // --- ফাঁকা ২০টি স্লট (ভবিষ্যতের জন্য) ---
+        { requester: 'Requester Name 9', title: 'Task Title 9', action: 'labeling' },
+        { requester: 'Requester Name 10', title: 'Task Title 10', action: 'labeling' },
+        { requester: 'Requester Name 11', title: 'Task Title 11', action: 'labeling' },
+        { requester: 'Requester Name 12', title: 'Task Title 12', action: 'labeling' },
+        { requester: 'Requester Name 13', title: 'Task Title 13', action: 'labeling' },
+        { requester: 'Requester Name 14', title: 'Task Title 14', action: 'labeling' },
+        { requester: 'Requester Name 15', title: 'Task Title 15', action: 'labeling' },
+        { requester: 'Requester Name 16', title: 'Task Title 16', action: 'labeling' },
+        { requester: 'Requester Name 17', title: 'Task Title 17', action: 'labeling' },
+        { requester: 'Requester Name 18', title: 'Task Title 18', action: 'labeling' },
+        { requester: 'Requester Name 19', title: 'Task Title 19', action: 'labeling' },
+        { requester: 'Requester Name 20', title: 'Task Title 20', action: 'labeling' }
     ];
 
     var QUEUE_URL           = 'https://worker.mturk.com/tasks';
-    var RELOAD_INTERVAL_MS  = 60 * 1000;
-    var SUBMIT_DELAY_MS     = 1200;                               // HasanBhai's Golden Rule
+    var INVOICE_DELAY_MS    = 3500; // Invoice এর জন্য 3.5s অপেক্ষা
+    var LABELING_DELAY_MS   = 1200; // Labeling এ টিক দেওয়ার পর 1.2s অপেক্ষা
     var POST_SUBMIT_WAIT_MS = 8000;
     var WHITE_PAGE_WAIT_MS  = 10000;
     var WORK_CLICK_DELAY_MS = 1500;
-
     var TAG = '[MLDG]';
 
     // ============================================================
     //  HELPERS
     // ============================================================
     function now(){ return Date.now(); }
-    var LOG_KEY = 'mldg_log';
-    var LOG_MAX = 200;
     function tsNow(){
         var d = new Date();
         function pad(n){ return n < 10 ? '0' + n : '' + n; }
@@ -71,7 +75,6 @@
         var line = '[' + tsNow() + '] ' + msg;
         try { console.log(TAG + ' ' + line); } catch(e){}
     }
-
     function txt(el){ return (el && (el.innerText || el.textContent) || '').replace(/\s+/g,' ').trim(); }
 
     function goToQueue(){
@@ -81,12 +84,10 @@
         }
         try { location.href = QUEUE_URL; } catch(e){ try { location.replace(QUEUE_URL); } catch(e2){} }
     }
-
     function isOnTaskPage(){ return /^\/projects\/[^\/]+\/tasks\/[^\/]+\/?$/.test(location.pathname); }
 
     function safeReload(reason){
         if (DRY_RUN || isOnTaskPage()) return false;
-        log('safeReload reason=' + (reason || '?'));
         goToQueue();
         return true;
     }
@@ -96,7 +97,6 @@
         var title = (document.title || '').toLowerCase();
         var body  = (document.body.innerText || '');
         if (title.indexOf('server busy') > -1 || body.indexOf('Continue shopping') > -1) {
-            log('Server-busy detected — dismissing');
             var els = document.querySelectorAll('input[type="submit"],button,a');
             for (var i = 0; i < els.length; i++) {
                 var t = (els[i].textContent || els[i].value || '');
@@ -124,7 +124,7 @@
     }
 
     // ============================================================
-    //  QUEUE PAGE MATCH LOGIC
+    //  QUEUE & TASK PAGE LOGIC
     // ============================================================
     function rowMatchesTarget(rowEl) {
         var t = txt(rowEl);
@@ -146,25 +146,38 @@
                 var isWork = /^\s*work\s*$/i.test(label) || /\/projects\/.+\/tasks\//.test(href);
                 if (isWork) {
                     if (DRY_RUN) return true;
+                    if (el.dataset.opened) continue; 
+
                     try {
+                        el.dataset.opened = "true";
+                        el.style.border = "2px solid blue";
+
                         if (href && href.indexOf('/projects/') > -1) {
-                            location.href = href.indexOf('http') === 0 ? href : ('https://worker.mturk.com' + href);
+                            var targetUrl = href.indexOf('http') === 0 ? href : ('https://worker.mturk.com' + href);
+                            if (typeof GM_openInTab !== 'undefined') {
+                                GM_openInTab(targetUrl, { active: false, insert: true });
+                            } else {
+                                window.open(targetUrl, '_blank');
+                            }
                             return true;
                         }
                         el.click();
                         return true;
-                    } catch (e) { log('Work click failed: ' + e.message); }
+                    } catch (e) {}
                 }
             }
         }
         return false;
     }
 
-    function pageIsTargetTask() {
+    function getMatchedTarget() {
         var body = document.body ? (document.body.innerText || '') : '';
-        return TARGETS.some(function(target) {
-            return body.indexOf(target.requester) !== -1 && body.indexOf(target.title) !== -1;
-        });
+        for (var i = 0; i < TARGETS.length; i++) {
+            if (body.indexOf(TARGETS[i].requester) > -1 && body.indexOf(TARGETS[i].title) > -1) {
+                return TARGETS[i];
+            }
+        }
+        return null;
     }
 
     function showBadge(text) {
@@ -183,16 +196,30 @@
     function isPostSubmitPage() { return /^\/projects\/[^\/]+\/tasks\/[^\/]+\/submit\/?$/.test(location.pathname || ''); }
     function isSagemakerIframe() { return window.top !== window && /\.sagemaker\.aws$/i.test(location.hostname); }
 
+    // ============================================================
+    //  PARENT-TO-IFRAME MESSAGE PASSING (Action Routing)
+    // ============================================================
     var MSG_TYPE_AUTH = 'MLDG_AUTH';
     var TRUSTED_PARENT_ORIGIN = 'https://worker.mturk.com';
     var _sagemakerAuthOk = false;
+    var _taskAction = 'labeling'; 
 
     function startParentAuthSignal() {
-        if (!pageIsTargetTask()) return;
+        var matched = getMatchedTarget();
+        if (!matched) return;
+
+        var actionType = matched.action || 'labeling';
+
         function blast() {
             var iframes = document.querySelectorAll('iframe');
             for (var i = 0; i < iframes.length; i++) {
-                try { iframes[i].contentWindow.postMessage({ type: MSG_TYPE_AUTH, ts: now() }, '*'); } catch (e) {}
+                try {
+                    iframes[i].contentWindow.postMessage({
+                        type: MSG_TYPE_AUTH,
+                        ts: now(),
+                        action: actionType
+                    }, '*');
+                } catch (e) {}
             }
         }
         blast();
@@ -204,11 +231,12 @@
             if (ev.origin !== TRUSTED_PARENT_ORIGIN) return;
             if (!ev.data || ev.data.type !== MSG_TYPE_AUTH) return;
             _sagemakerAuthOk = true;
+            _taskAction = ev.data.action || 'labeling';
         });
     }
 
     // ============================================================
-    // SHADOW DOM & SMART SELECTORS FOR SAGE-MAKER IFRAME
+    // SHADOW DOM HELPERS FOR OPTIONS
     // ============================================================
     function getElementsDeep(selector, root = document) {
         let results = Array.from(root.querySelectorAll(selector));
@@ -236,61 +264,58 @@
     }
 
     // ============================================================
-    // UPDATED CONTINUOUS POLLING LOOP
+    // DUAL EXECUTION LOOP
     // ============================================================
-    var _actionTriggered = false;
-    var _pollAttempts = 0;
+    var _hasExecuted = false;
 
     function sagemakerSubmitLoop() {
-        if (_actionTriggered) return;
+        if (_hasExecuted) return;
 
         if (!_sagemakerAuthOk) {
-            setTimeout(sagemakerSubmitLoop, 1000);
+            setTimeout(sagemakerSubmitLoop, 500);
             return;
         }
 
-        let options = getTaskOptions();
-
-        if (options.length >= 2) {
-            _actionTriggered = true;
-            log(`sagemaker: Found ${options.length} options! Applying selection logic...`);
-
-            let selectedIndex = 0;
-            let rand = Math.random() * 100;
-            if (options.length >= 3) {
-                if (rand < 95) selectedIndex = 0;
-                else if (rand < 98) selectedIndex = 1;
-                else selectedIndex = 2;
-            } else if (options.length === 2) {
-                if (rand < 95) selectedIndex = 0;
-                else selectedIndex = 1;
-            }
-
-            const targetOption = options[selectedIndex];
-
-            targetOption.click();
-            if (targetOption.shadowRoot) {
-                const inner = targetOption.shadowRoot.querySelector('input, button, label');
-                if (inner) inner.click();
-            }
-            if ('checked' in targetOption) targetOption.checked = true;
-
-            setTimeout(doFinalSubmit, SUBMIT_DELAY_MS);
+        if (_taskAction === 'invoice') {
+            _hasExecuted = true;
+            log(`sagemaker: Action=Invoice. Waiting ${INVOICE_DELAY_MS}ms before forced submit.`);
+            setTimeout(doFinalSubmit, INVOICE_DELAY_MS);
             return;
         }
 
-        _pollAttempts++;
-        if (_pollAttempts > 15) {
-            let submitExists = getElementsDeep('crowd-submit, button[type="submit"], [data-testid="crowd-submit"]').filter(isVisible).length > 0;
-            if (submitExists) {
-                _actionTriggered = true;
-                log('sagemaker: No options found after 15s. Forcing submit anyway...');
-                setTimeout(doFinalSubmit, 500);
+        if (_taskAction === 'labeling') {
+            let options = getTaskOptions();
+
+            if (options.length >= 2) {
+                _hasExecuted = true;
+                log(`sagemaker: Action=Labeling. Found ${options.length} options! Applying selection logic...`);
+
+                let selectedIndex = 0;
+                let rand = Math.random() * 100;
+                if (options.length >= 3) {
+                    if (rand < 95) selectedIndex = 0;
+                    else if (rand < 98) selectedIndex = 1;
+                    else selectedIndex = 2;
+                } else if (options.length === 2) {
+                    if (rand < 95) selectedIndex = 0;
+                    else selectedIndex = 1;
+                }
+
+                const targetOption = options[selectedIndex];
+                targetOption.click();
+                if (targetOption.shadowRoot) {
+                    const inner = targetOption.shadowRoot.querySelector('input, button, label');
+                    if (inner) inner.click();
+                }
+                if ('checked' in targetOption) targetOption.checked = true;
+
+                setTimeout(doFinalSubmit, LABELING_DELAY_MS);
                 return;
             }
-        }
 
-        setTimeout(sagemakerSubmitLoop, 500);
+            setTimeout(sagemakerSubmitLoop, 500);
+            return;
+        }
     }
 
     // ============================================================
@@ -331,6 +356,10 @@
                         }
                     }
                     actualSubmitBtn.click();
+                } else {
+                    var basicBtn = document.querySelector('crowd-button[data-testid="crowd-submit"]') ||
+                                   document.querySelector('crowd-button[form-action="submit"]');
+                    if (basicBtn) basicBtn.click();
                 }
             })();
         `;
@@ -341,17 +370,38 @@
     }
 
     function main() {
+        // ==========================================
+        // 404 & SUCCESS PAGE AUTO-CLOSER (Fixed for New Tab)
+        // ==========================================
+        if (window.self === window.top && document.body) {
+            var pageText = document.body.innerText || '';
+            var is404 = pageText.includes("Sorry, we couldn't find that page");
+            var isSubmitted = pageText.includes("HIT Submitted") || pageText.includes("There are no more of these HITs available");
+
+            if (is404 || isSubmitted) {
+                showBadge('closing tab...');
+                setTimeout(function() {
+                    window.close();
+                    setTimeout(function() { window.open('', '_self'); window.close(); }, 150);
+                }, 2000); // কাজ শেষ হওয়ার ২ সেকেন্ড পর কেটে যাবে
+                return;
+            }
+        }
+
         if (isSagemakerIframe()) {
             setupSagemakerListener();
-            setTimeout(sagemakerSubmitLoop, 1000);
+            setTimeout(sagemakerSubmitLoop, 500);
             return;
         }
 
         handleServerBusy();
 
         if (isPostSubmitPage()) {
-            showBadge('post-submit → queue');
-            setTimeout(goToQueue, 4000);
+            showBadge('post-submit → closing tab');
+            setTimeout(function() {
+                window.close();
+                setTimeout(function() { window.open('', '_self'); window.close(); }, 150);
+            }, 2500);
             return;
         }
 
