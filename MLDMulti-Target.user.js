@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MLD Ultimate Auto Submit (Dual Action Mode - New Tab & Auto Close)
 // @namespace    http://violentmonkey.net/
-// @version      2.2
-// @description  Perfectly handles BOTH 'Invoice' and 'Labeling' tasks. Opens HITs in a new tab and auto-closes them after submission reliably.
+// @version      2.3
+// @description  Perfectly handles BOTH 'Invoice' and 'Labeling' tasks. Opens HITs in a new tab and auto-closes them reliably. Fixes double open bug.
 // @author       nkorim321
 // @match        https://worker.mturk.com/*
 // @match        https://www.mturk.com/*
@@ -26,9 +26,6 @@
     // ============================================================
     //  🎯 TARGET LIST (কাজের তালিকা ও তার নিয়ম)
     // ============================================================
-    // action: 'invoice' = অপশন খুঁজবে না, সোজা 3.5s পর সাবমিট করবে। (1.20 এর নিয়ম)
-    // action: 'labeling' = অপশনের জন্য অপেক্ষা করবে, টিক দিয়ে সাবমিট করবে।
-
     var TARGETS = [
         // --- Invoice কাজের লিস্ট ---
         { requester: 'MLDataGatherer', title: 'Smart Capture Invoice Review', action: 'invoice' },
@@ -58,12 +55,15 @@
     ];
 
     var QUEUE_URL           = 'https://worker.mturk.com/tasks';
-    var INVOICE_DELAY_MS    = 3500; // Invoice এর জন্য 3.5s অপেক্ষা
-    var LABELING_DELAY_MS   = 1200; // Labeling এ টিক দেওয়ার পর 1.2s অপেক্ষা
+    var INVOICE_DELAY_MS    = 3500; 
+    var LABELING_DELAY_MS   = 1200; 
     var POST_SUBMIT_WAIT_MS = 8000;
     var WHITE_PAGE_WAIT_MS  = 10000;
     var WORK_CLICK_DELAY_MS = 1500;
     var TAG = '[MLDG]';
+
+    // ডাবল ক্লিক ঠেকানোর জন্য মেমোরি 
+    var _openedLinks = {};
 
     // ============================================================
     //  HELPERS
@@ -147,24 +147,25 @@
                 var label = (el.textContent || el.value || '').trim();
                 var href  = (el.getAttribute && el.getAttribute('href')) || '';
                 var isWork = /^\s*work\s*$/i.test(label) || /\/projects\/.+\/tasks\//.test(href);
+                
                 if (isWork) {
                     if (DRY_RUN) return true;
-                    if (el.dataset.opened) continue;
+
+                    var targetUrl = href.indexOf('http') === 0 ? href : ('https://worker.mturk.com' + href);
+
+                    // ডাবল ওপেন সমস্যা ফিক্স: লিংকটা একবার ওপেন হলে আর করবে না
+                    if (_openedLinks[targetUrl]) continue;
 
                     try {
                         el.dataset.opened = "true";
                         el.style.border = "2px solid blue";
+                        _openedLinks[targetUrl] = true; // লিংকটি মেমোরিতে সেভ হলো
 
-                        if (href && href.indexOf('/projects/') > -1) {
-                            var targetUrl = href.indexOf('http') === 0 ? href : ('https://worker.mturk.com' + href);
-                            if (typeof GM_openInTab !== 'undefined') {
-                                GM_openInTab(targetUrl, { active: false, insert: true });
-                            } else {
-                                window.open(targetUrl, '_blank');
-                            }
-                            return true;
+                        if (typeof GM_openInTab !== 'undefined') {
+                            GM_openInTab(targetUrl, { active: false, insert: true });
+                        } else {
+                            window.open(targetUrl, '_blank');
                         }
-                        el.click();
                         return true;
                     } catch (e) {}
                 }
@@ -374,7 +375,7 @@
 
     function main() {
         // ==========================================
-        // 404 & SUCCESS PAGE AUTO-CLOSER (Fixed for New Tab)
+        // 404 & SUCCESS PAGE AUTO-CLOSER
         // ==========================================
         if (window.self === window.top && document.body) {
             var pageText = document.body.innerText || '';
