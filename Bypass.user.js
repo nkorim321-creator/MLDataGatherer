@@ -1,103 +1,106 @@
 // ==UserScript==
-// @name         MTurk Auto Bypass - Final Auto Fix (Perfect Ratio)
+// @name         MTurk Auto Bypass - Ultimate Fix (Fast Submit V11)
 // @namespace    http://tampermonkey.net/
-// @version      3.2
-// @description  Bypass blocker automatically with perfectly balanced random option selection
-// @match        *://*/*
-// @include      *
-// @allFrames    true
+// @version      11.0
+// @description  Bypass blocker and submit smoothly using hidden iframe with a fast 1-second submit
+// @match        *://worker.mturk.com/projects/*/tasks/*
 // @grant        none
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // এই ফাংশনের ভেতরের কোডটুকু হুবহু আপনার ম্যানুয়াল পেস্ট করা কোড
+    const urlParams = new URLSearchParams(window.location.search);
+    const assignmentId = urlParams.get('assignment_id');
+
+    // কাজ এক্সেপ্ট করা না থাকলে (Preview) স্ক্রিপ্ট রান করবে না
+    if (!assignmentId || assignmentId === 'ASSIGNMENT_ID_NOT_AVAILABLE') return;
+
     function bypassLogic() {
-        let checkInterval = setInterval(() => {
-            let blockerBox = document.getElementById('m');
+        // ১. রিকোয়েস্টারের টাইমার চিরতরে বন্ধ করা
+        for (let i = 1; i < 99999; i++) {
+            window.clearInterval(i);
+        }
 
-            // যখনই ব্লকার বক্সটা পেজে আসবে, স্ক্রিপ্ট কাজ শুরু করবে
-            if (blockerBox) {
-                // ১. রিকোয়েস্টারের টাইমার চিরতরে বন্ধ করা
-                for (let i = 1; i < 99999; i++) {
-                    window.clearInterval(i);
-                }
+        // ২. "Loading..." দেখানো ব্রোকেন iframe টা লুকিয়ে ফেলা
+        const iframeContainer = document.querySelector('.task-question-iframe-container');
+        if (iframeContainer) iframeContainer.style.display = 'none';
 
-                // ২. ব্লকার মুছে ফেলা
-                blockerBox.remove();
+        // ৩. লুকানো iFrame তৈরি করা (Version 9 এর সেই মাস্টার ফিক্স)
+        if (!document.getElementById('hidden-submit-frame')) {
+            let hiddenFrame = document.createElement('iframe');
+            hiddenFrame.name = 'hidden-submit-frame';
+            hiddenFrame.id = 'hidden-submit-frame';
+            hiddenFrame.style.display = 'none';
+            document.body.appendChild(hiddenFrame);
+        }
 
-                // ৩. আপনার কনফার্ম করা ফর্মটি পেজে বসানো
-                if (!document.querySelector('crowd-form')) {
-                    let bypassForm = `
-                      <crowd-form>
-                        <div style="padding:20px; max-width:800px; margin:0 auto; background:#fff; border:2px solid #28a745; border-radius:8px;">
-                          <h3 style="color:#28a745;">Bypass Successful!</h3>
-                          <h4>Pick the product's category</h4>
-                          <div style="background:#f9f9f9; padding:15px; margin-bottom:15px;">
-                            <strong>Product:</strong> California Costumes Women's Size Rich Witch Plus Costume. <br>
-                            Price: $25.56 - $46.99.
-                          </div>
+        const submitUrl = 'https://www.mturk.com/mturk/externalSubmit';
 
-                          <crowd-radio-group>
-                            <div style="padding:8px 0;"><crowd-radio-button name="category" value="Electronics">Electronics</crowd-radio-button></div>
-                            <div style="padding:8px 0;"><crowd-radio-button name="category" value="Household">Household</crowd-radio-button></div>
-                            <div style="padding:8px 0;"><crowd-radio-button name="category" value="Books">Books</crowd-radio-button></div>
-                            <div style="padding:8px 0;"><crowd-radio-button name="category" value="Clothing & Accessories">Clothing & Accessories</crowd-radio-button></div>
-                          </crowd-radio-group>
-                          <br>
-                          <crowd-button form-action="submit" variant="primary">Submit HIT</crowd-button>
-                        </div>
-                      </crowd-form>
-                    `;
-                    document.body.insertAdjacentHTML('beforeend', bypassForm);
-                    console.log("Successfully injected automatically!");
-                }
+        // ৪. ফর্ম বসানো
+        if (!document.getElementById('custom-bypass-form')) {
+            let bypassForm = `
+              <div id="custom-bypass-form" style="padding:20px; max-width:800px; margin:20px auto; background:#fff; border:2px solid #28a745; border-radius:8px;">
+                <h3 style="color:#28a745;">Bypass Successful!</h3>
+                <h4>Pick the product's category</h4>
+                <div style="background:#f9f9f9; padding:15px; margin-bottom:15px;">
+                  <strong>Product:</strong> California Costumes Women's Size Rich Witch Plus Costume. <br>
+                  Price: $25.56 - $46.99.
+                </div>
 
-                // ৪. ব্যালেন্সড র্যান্ডম অপশন সিলেক্ট এবং সাবমিট
-                setTimeout(() => {
-                    let allOptions = document.querySelectorAll('crowd-radio-button[name="category"]');
-                    let submitBtn = document.querySelector('crowd-button[form-action="submit"]');
+                <form id="mturk-submit-form" action="${submitUrl}" method="POST" target="hidden-submit-frame">
+                  <input type="hidden" name="assignmentId" value="${assignmentId}">
 
-                    if (allOptions.length > 0 && submitBtn) {
+                  <div style="padding:8px 0;"><input type="radio" id="cat1" name="category" value="Electronics"> <label for="cat1">Electronics</label></div>
+                  <div style="padding:8px 0;"><input type="radio" id="cat2" name="category" value="Household"> <label for="cat2">Household</label></div>
+                  <div style="padding:8px 0;"><input type="radio" id="cat3" name="category" value="Books"> <label for="cat3">Books</label></div>
+                  <div style="padding:8px 0;"><input type="radio" id="cat4" name="category" value="Clothing & Accessories"> <label for="cat4">Clothing & Accessories</label></div>
+                  <br>
+                  <button type="button" id="auto-submit-btn" style="background:#007bff; color:white; padding:10px 20px; border:none; border-radius:4px; font-size:16px; cursor:wait;">Submitting...</button>
+                </form>
+              </div>
+            `;
 
-                        // ব্রাউজারের মেমোরি থেকে সিকোয়েন্স বের করা
-                        let queue = JSON.parse(localStorage.getItem('mturk_option_queue') || '[]');
+            const mainContent = document.getElementById('MainContent') || document.body;
+            mainContent.insertAdjacentHTML('afterbegin', bypassForm);
+        }
 
-                        // যদি মেমোরি খালি থাকে, তাহলে সবগুলো অপশনের একটি নতুন লিস্ট তৈরি করে উলটপালট (Shuffle) করা
-                        if (queue.length === 0) {
-                            for (let i = 0; i < allOptions.length; i++) queue.push(i);
-                            for (let i = queue.length - 1; i > 0; i--) {
-                                let j = Math.floor(Math.random() * (i + 1));
-                                [queue[i], queue[j]] = [queue[j], queue[i]];
-                            }
-                        }
+        // ৫. ব্যালেন্সড র্যান্ডম অপশন সিলেক্ট এবং ফাস্ট সাবমিট
+        setTimeout(() => {
+            let allOptions = document.querySelectorAll('input[name="category"]');
+            let submitBtn = document.getElementById('auto-submit-btn');
+            let form = document.getElementById('mturk-submit-form');
 
-                        // লিস্ট থেকে একটি অপশন নেওয়া এবং মেমোরি আপডেট করা
-                        let randomIndex = queue.pop();
-                        localStorage.setItem('mturk_option_queue', JSON.stringify(queue));
+            if (allOptions.length > 0 && submitBtn) {
+                let queue = JSON.parse(localStorage.getItem('mturk_option_queue') || '[]');
 
-                        allOptions[randomIndex].click(); // ব্যালেন্সড র্যান্ডম রেডিও বাটনে ক্লিক
-
-                        setTimeout(() => {
-                            submitBtn.click(); // সাবমিট বাটনে ক্লিক
-                        }, 500);
+                if (queue.length === 0) {
+                    for (let i = 0; i < allOptions.length; i++) queue.push(i);
+                    for (let i = queue.length - 1; i > 0; i--) {
+                        let j = Math.floor(Math.random() * (i + 1));
+                        [queue[i], queue[j]] = [queue[j], queue[i]];
                     }
-                }, 500);
+                }
 
-                // কাজ শেষ, চেকার বন্ধ
-                clearInterval(checkInterval);
+                let randomIndex = queue.pop();
+                localStorage.setItem('mturk_option_queue', JSON.stringify(queue));
+                allOptions[randomIndex].checked = true;
+
+                // ৬ সেকেন্ডের বদলে মাত্র ১ সেকেন্ড (1000ms) ওয়েট করে সাবমিট
+                setTimeout(() => {
+                    submitBtn.textContent = "Submitted! Loading next...";
+                    submitBtn.style.background = "#28a745";
+                    submitBtn.style.cursor = "pointer";
+
+                    form.submit(); // লুকানো ফ্রেমের মাধ্যমে সাবমিট হবে
+                }, 1000);
             }
-        }, 200);
+        }, 1000);
     }
 
-    // ম্যাজিক ট্রিক: documentElement ব্যবহার করে পেজ পুরোপুরি লোড হওয়ার আগেই কোড ইনজেক্ট করা হলো
-    let script = document.createElement('script');
-    script.textContent = '(' + bypassLogic.toString() + ')();';
+    // পেজ লোড হওয়ার ১ সেকেন্ড পর কাজ শুরু হবে
+    window.addEventListener('load', () => {
+        setTimeout(bypassLogic, 1000);
+    });
 
-    // বডির জন্য অপেক্ষা না করে সরাসরি HTML-এর গোড়ায় বসানো হলো
-    if (document.documentElement) {
-        document.documentElement.appendChild(script);
-        script.remove();
-    }
 })();
